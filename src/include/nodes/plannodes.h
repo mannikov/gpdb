@@ -144,6 +144,9 @@ typedef struct PlannedStmt
 	/* What is the memory reserved for this query's execution? */
 	uint64		query_mem;
 
+	int			total_memory_coordinator;	/* GPDB: The total usable virtual memory on coordinator node in MB */
+	int			nsegments_coordinator;		/* GPDB: The number of primary segments on coordinator node  */
+
 	/*
 	 * GPDB: Used to keep target information for CTAS and it is needed
 	 * to be dispatched to QEs.
@@ -1033,6 +1036,9 @@ typedef struct ShareInputScan
 
 	/* Number of consumer slices participating, not including the producer. */
 	int			nconsumers;
+
+	/* Discard the scan output? True for ORCA CTE producer, false otherwise. */
+	bool        discard_output;
 } ShareInputScan;
 
 /* ----------------

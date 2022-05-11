@@ -43,6 +43,7 @@
 #include "access/xact.h"
 #include "catalog/oid_dispatch.h"
 #include "catalog/pg_type.h"
+#include "catalog/namespace.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
 #include "commands/extension.h"
@@ -94,6 +95,7 @@
 #include "cdb/cdbdtxcontextinfo.h"
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbdispatchresult.h"
+#include "cdb/cdbendpoint.h"
 #include "cdb/cdbgang.h"
 #include "cdb/ml_ipc.h"
 #include "utils/guc.h"
@@ -103,7 +105,6 @@
 
 #include "utils/session_state.h"
 #include "utils/vmem_tracker.h"
-#include "tcop/idle_resource_cleaner.h"
 
 /* ----------------
  *		global variables
@@ -124,6 +125,9 @@ int			max_stack_depth = 100;
 
 /* wait N seconds to allow attach from a debugger */
 int			PostAuthDelay = 0;
+
+/* Time between checks that the client is still connected. */
+int         client_connection_check_interval = 0;
 
 
 /*
@@ -235,7 +239,7 @@ static int	InteractiveBackend(StringInfo inBuf);
 static int	interactive_getc(void);
 static int	SocketBackend(StringInfo inBuf);
 static int	ReadCommand(StringInfo inBuf);
-static void forbidden_in_wal_sender(char firstchar);
+static void forbidden_in_wal_sender(int firstchar);
 static List *pg_rewrite_query(Query *query);
 static bool check_log_statement(List *stmt_list);
 static int	errdetail_execute(List *raw_parsetree_list);
@@ -410,11 +414,7 @@ interactive_getc(void)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	enable_client_wait_timeout_interrupt();
-
 	c = getc(stdin);
-
-	disable_client_wait_timeout_interrupt();
 
 	ProcessClientReadInterrupt(false);
 
@@ -587,6 +587,7 @@ SocketBackend(StringInfo inBuf)
 		case 'd':				/* copy data */
 		case 'c':				/* copy done */
 		case 'f':				/* copy fail */
+		case '?':				/* Greenplum sequence response */
 			doing_extended_query_message = false;
 			/* these are only legal in protocol 3 */
 			if (PG_PROTOCOL_MAJOR(FrontendProtocol) < 3)
@@ -1141,6 +1142,8 @@ exec_mpp_query(const char *query_string,
 	ExecSlice  *slice = NULL;
 	ParamListInfo paramLI = NULL;
 
+	SIMPLE_FAULT_INJECTOR("exec_mpp_query_start");
+
 	Assert(Gp_role == GP_ROLE_EXECUTE);
 	/*
 	 * If we didn't get passed a query string, dummy something up for ps display and pg_stat_activity
@@ -1203,6 +1206,10 @@ exec_mpp_query(const char *query_string,
 		ddesc = (QueryDispatchDesc *) deserializeNode(serializedQueryDispatchDesc,serializedQueryDispatchDesclen);
 		if (!ddesc || !IsA(ddesc, QueryDispatchDesc))
 			elog(ERROR, "MPPEXEC: received invalid QueryDispatchDesc with planned statement");
+		/*
+		 * Deserialize and apply security context from QD.
+		 */
+		SetUserIdAndSecContext(GetUserId(), ddesc->secContext);
 
         sliceTable = ddesc->sliceTable;
 
@@ -1629,6 +1636,13 @@ restore_guc_to_QE(void )
 			 * we can not keep alive gang anymore.
 			 */
 			DisconnectAndDestroyAllGangs(false);
+			/*
+			 * when qe elog an error, qd will use ReThrowError to
+			 * re throw the error, the errordata_stack_depth will ++,
+			 * when we catch the error we should reset errordata_stack_depth
+			 * by FlushErrorState.
+			 */
+			FlushErrorState();
 		}
 		PG_END_TRY();
 	}
@@ -1766,12 +1780,11 @@ exec_simple_query(const char *query_string)
 		}
 
 		/*
-		 * If are connected in utility mode, disallow PREPARE TRANSACTION
-		 * statements.
+		 * GPDB: If we are connected in utility mode, disallow PREPARE
+		 * TRANSACTION statements.
 		 */
-		TransactionStmt *transStmt = (TransactionStmt *) parsetree;
-		if (Gp_role == GP_ROLE_UTILITY && IsA(parsetree, TransactionStmt) &&
-			transStmt->kind == TRANS_STMT_PREPARE)
+		if (Gp_role == GP_ROLE_UTILITY && IsA(parsetree->stmt, TransactionStmt) &&
+			((TransactionStmt *) parsetree->stmt)->kind == TRANS_STMT_PREPARE)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -3328,6 +3341,16 @@ start_xact_command(void)
 	 * not desired, the timeout has to be disabled explicitly.
 	 */
 	enable_statement_timeout();
+
+	/* Start timeout for checking if the client has gone away if necessary. */
+	if (client_connection_check_interval > 0 &&
+		/* doesn't operate on segments in case of distributed queries */
+		Gp_role != GP_ROLE_EXECUTE &&
+		IsUnderPostmaster &&
+		MyProcPort &&
+		!get_timeout_active(CLIENT_CONNECTION_CHECK_TIMEOUT))
+		enable_timeout_after(CLIENT_CONNECTION_CHECK_TIMEOUT,
+							 client_connection_check_interval);
 }
 
 static void
@@ -3855,6 +3878,27 @@ ProcessInterrupts(const char* filename, int lineno)
 						 errmsg("terminating connection due to administrator command")));
 		}
 	}
+
+	if (CheckClientConnectionPending)
+	{
+		CheckClientConnectionPending = false;
+
+		/*
+		 * Check for lost connection and re-arm, if still configured, but not
+		 * if we've arrived back at DoingCommandRead state.  We don't want to
+		 * wake up idle sessions, and they already know how to detect lost
+		 * connections.
+		 */
+		if (!DoingCommandRead && client_connection_check_interval > 0)
+		{
+			if (!pq_check_connection())
+				ClientConnectionLost = true;
+			else
+				enable_timeout_after(CLIENT_CONNECTION_CHECK_TIMEOUT,
+									 client_connection_check_interval);
+		}
+	}
+
 	if (ClientConnectionLost)
 	{
 		QueryCancelPending = false; /* lost connection trumps QueryCancel */
@@ -3965,39 +4009,53 @@ ProcessInterrupts(const char* filename, int lineno)
 		 */
 		if (!DoingCommandRead)
 		{
+			StringInfoData cancel_msg_str;
+
 			LockErrorCleanup();
+			initStringInfo(&cancel_msg_str);
+
+			if (HasCancelMessage())
+			{
+				char *buffer = palloc0(MAX_CANCEL_MSG);
+
+				GetCancelMessage(&buffer, MAX_CANCEL_MSG);
+				appendStringInfo(&cancel_msg_str, ": \"%s\"", buffer);
+				pfree(buffer);
+			}
 
 			if (Gp_role == GP_ROLE_EXECUTE)
 				ereport(ERROR,
 						(errcode(ERRCODE_GP_OPERATION_CANCELED),
-						 errmsg("canceling MPP operation")));
-			else if (HasCancelMessage())
-			{
-				char   *buffer = palloc0(MAX_CANCEL_MSG);
-
-				GetCancelMessage(&buffer, MAX_CANCEL_MSG);
-				ereport(ERROR,
-						(errcode(ERRCODE_QUERY_CANCELED),
-						 errmsg("canceling statement due to user request: \"%s\"",
-								buffer)));
-			}
+						 errmsg("canceling MPP operation%s", cancel_msg_str.data)));
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_QUERY_CANCELED),
-						 errmsg("canceling statement due to user request")));
+						 errmsg("canceling statement due to user request%s", cancel_msg_str.data)));
 		}
 	}
 
 	if (IdleInTransactionSessionTimeoutPending)
 	{
-		/* Has the timeout setting changed since last we looked? */
+		/*
+		 * If the GUC has been reset to zero, ignore the signal.  This is
+		 * important because the GUC update itself won't disable any pending
+		 * interrupt.
+		 */
 		if (IdleInTransactionSessionTimeout > 0)
 			ereport(FATAL,
 					(errcode(ERRCODE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT),
 					 errmsg("terminating connection due to idle-in-transaction timeout")));
 		else
 			IdleInTransactionSessionTimeoutPending = false;
+	}
 
+	if (IdleGangTimeoutPending)
+	{
+		/* As above, ignore the signal if the GUC has been reset to zero. */
+		if (IdleSessionGangTimeout > 0)
+			DisconnectAndDestroyUnusedQEs();
+
+		IdleGangTimeoutPending = false;
 	}
 
 	if (ParallelMessagePending)
@@ -4584,9 +4642,9 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
  * received, and is used to construct the error message.
  */
 static void
-check_forbidden_in_gpdb_handlers(char firstchar)
+check_forbidden_in_gpdb_handlers(int firstchar)
 {
-	if (am_ftshandler || IsFaultHandler)
+	if (am_ftshandler || am_faulthandler)
 	{
 		switch (firstchar)
 		{
@@ -4603,6 +4661,15 @@ check_forbidden_in_gpdb_handlers(char firstchar)
 	}
 }
 
+static void
+forbidden_in_retrieve_handler(int firstchar)
+{
+	if (am_cursor_retrieve_handler)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("protocol '%c' is not supported in a GPDB parallel retrieve cursor connection",
+						firstchar)));
+}
 
 /* ----------------------------------------------------------------
  * PostgresMain
@@ -4624,7 +4691,8 @@ PostgresMain(int argc, char *argv[],
 	StringInfoData input_message;
 	sigjmp_buf	local_sigjmp_buf;
 	volatile bool send_ready_for_query = true;
-	bool		disable_idle_in_transaction_timeout = false;
+	bool		idle_in_transaction_timeout_enabled = false;
+	bool		idle_gang_timeout_enabled = false;
 
 	/*
 	 * CDB: Catch program error signals.
@@ -4865,7 +4933,7 @@ PostgresMain(int argc, char *argv[],
 	}
 
 	/* Also send GPDB QE-backend startup info (motion listener, version). */
-	if (!(am_ftshandler || IsFaultHandler) && Gp_role == GP_ROLE_EXECUTE)
+	if (!(am_ftshandler || am_faulthandler) && Gp_role == GP_ROLE_EXECUTE)
 	{
 #ifdef FAULT_INJECTOR
 		if (SIMPLE_FAULT_INJECTOR("send_qe_details_init_backend") != FaultInjectorTypeSkip)
@@ -4956,7 +5024,6 @@ PostgresMain(int argc, char *argv[],
 
 		/* Not reading from the client anymore. */
 		DoingCommandRead = false;
-		DisableClientWaitTimeoutInterrupt();
 
 		/* Make sure libpq is in a good state */
 		pq_comm_reset();
@@ -5017,10 +5084,6 @@ PostgresMain(int argc, char *argv[],
 
 		/* We don't have a transaction command open anymore */
 		xact_started = false;
-
-		/* When QE error in creating extension, we must reset CurrentExtensionObject */
-		creating_extension = false;
-		CurrentExtensionObject = InvalidOid;
 
 		/* Inform Vmem tracker that the current process has finished cleanup */
 		RunawayCleaner_RunawayCleanupDoneForProcess(false /* ignoredCleanup */);
@@ -5107,31 +5170,44 @@ PostgresMain(int argc, char *argv[],
 		 * processing of batched messages, and because we don't want to report
 		 * uncommitted updates (that confuses autovacuum).  The notification
 		 * processor wants a call too, if we are not in a transaction block.
+		 *
+		 * Also, if an idle timeout is enabled, start the timer for that.
 		 */
 		if (send_ready_for_query)
 		{
+			char activity[50];
+			memset(activity, 0, sizeof(activity));
+			int remain = sizeof(activity);
+
+			if (am_cursor_retrieve_handler)
+			{
+				strncpy(activity, "[retrieve] ", sizeof(activity));
+				remain -= strlen(activity);
+			}
 			if (IsAbortedTransactionBlockState())
 			{
-				set_ps_display("idle in transaction (aborted)", false);
+				strncat(activity, "idle in transaction (aborted)", remain);
+				set_ps_display(activity, false);
 				pgstat_report_activity(STATE_IDLEINTRANSACTION_ABORTED, NULL);
 
 				/* Start the idle-in-transaction timer */
 				if (IdleInTransactionSessionTimeout > 0)
 				{
-					disable_idle_in_transaction_timeout = true;
+					idle_in_transaction_timeout_enabled = true;
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 										 IdleInTransactionSessionTimeout);
 				}
 			}
 			else if (IsTransactionOrTransactionBlock())
 			{
-				set_ps_display("idle in transaction", false);
+				strncat(activity, "idle in transaction", remain);
+				set_ps_display(activity, false);
 				pgstat_report_activity(STATE_IDLEINTRANSACTION, NULL);
 
 				/* Start the idle-in-transaction timer */
 				if (IdleInTransactionSessionTimeout > 0)
 				{
-					disable_idle_in_transaction_timeout = true;
+					idle_in_transaction_timeout_enabled = true;
 					enable_timeout_after(IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 										 IdleInTransactionSessionTimeout);
 				}
@@ -5142,8 +5218,17 @@ PostgresMain(int argc, char *argv[],
 				pgstat_report_stat(false);
 				pgstat_report_queuestat();
 
-				set_ps_display("idle", false);
+				strncat(activity, "idle", remain);
+				set_ps_display(activity, false);
 				pgstat_report_activity(STATE_IDLE, NULL);
+			}
+
+			/* Start the idle-gang timer */
+			if (Gp_role == GP_ROLE_DISPATCH && IdleSessionGangTimeout > 0 && cdbcomponent_qesExist())
+			{
+				idle_gang_timeout_enabled = true;
+				enable_timeout_after(IDLE_GANG_TIMEOUT,
+									 IdleSessionGangTimeout);
 			}
 
 			ReadyForQuery(whereToSendOutput);
@@ -5160,21 +5245,14 @@ PostgresMain(int argc, char *argv[],
 
 		/*
 		 * (2b) Check for temp table delete reset session work.
-		 * Also clean up idle resources.
 		 */
 		if (Gp_role == GP_ROLE_DISPATCH)
-		{
 			GpDropTempTables();
-			StartIdleResourceCleanupTimers();
-		}
 
 		/*
 		 * (3) read a command (loop blocks here)
 		 */
 		firstchar = ReadCommand(&input_message);
-
-		if (Gp_role == GP_ROLE_DISPATCH)
-			CancelIdleResourceCleanupTimers();
 
 		/*
 		 * Reset QueryFinishPending flag, so that if we received a delayed
@@ -5199,12 +5277,21 @@ PostgresMain(int argc, char *argv[],
 		DoingCommandRead = false;
 
 		/*
-		 * (5) turn off the idle-in-transaction timeout
+		 * (5) turn off the idle-in-transaction and idle-session timeouts, if
+		 * active.
+		 *
+		 * At most one of these two will be active, so there's no need to
+		 * worry about combining the timeout.c calls into one.
 		 */
-		if (disable_idle_in_transaction_timeout)
+		if (idle_in_transaction_timeout_enabled)
 		{
 			disable_timeout(IDLE_IN_TRANSACTION_SESSION_TIMEOUT, false);
-			disable_idle_in_transaction_timeout = false;
+			idle_in_transaction_timeout_enabled = false;
+		}
+		if (idle_gang_timeout_enabled)
+		{
+			disable_timeout(IDLE_GANG_TIMEOUT, false);
+			idle_gang_timeout_enabled = false;
 		}
 
 		/*
@@ -5257,7 +5344,7 @@ PostgresMain(int argc, char *argv[],
 					}
 					else if (am_ftshandler)
 						HandleFtsMessage(query_string);
-					else if (IsFaultHandler)
+					else if (am_faulthandler)
 						HandleFaultMessage(query_string);
 					else
 						exec_simple_query(query_string);
@@ -5369,6 +5456,15 @@ PostgresMain(int argc, char *argv[],
 					if (resgroupInfoLen > 0)
 						resgroupInfoBuf = pq_getmsgbytes(&input_message, resgroupInfoLen);
 
+					/* in-process variable for temporary namespace */
+					{
+						Oid			tempNamespaceId, tempToastNamespaceId;
+
+						tempNamespaceId = pq_getmsgint(&input_message, sizeof(tempNamespaceId));
+						tempToastNamespaceId = pq_getmsgint(&input_message, sizeof(tempToastNamespaceId));
+						SetTempNamespaceStateAfterBoot(tempNamespaceId, tempToastNamespaceId);
+					}
+
 					pq_getmsgend(&input_message);
 
 					elog((Debug_print_full_dtm ? LOG : DEBUG5), "MPP dispatched stmt from QD: %s.",query_string);
@@ -5425,7 +5521,7 @@ PostgresMain(int argc, char *argv[],
 									   serializedPlantree, serializedPlantreelen,
 									   serializedQueryDispatchDesc, serializedQueryDispatchDesclen);
 
-					SetUserIdAndContext(GetOuterUserId(), false);
+					SetUserIdAndSecContext(GetOuterUserId(), 0);
 
 					send_ready_for_query = true;
 				}
@@ -5548,6 +5644,7 @@ PostgresMain(int argc, char *argv[],
 
 			case 'F':			/* fastpath function call */
 				forbidden_in_wal_sender(firstchar);
+				forbidden_in_retrieve_handler(firstchar);
 
 				/* Set statement_timestamp() */
 				SetCurrentStatementStartTimestamp();
@@ -5706,6 +5803,17 @@ PostgresMain(int argc, char *argv[],
 				 * is still sending data.
 				 */
 				break;
+			case '?':			/* Greenplum sequence response */
+				/*
+				 * Accept but ignore this message, when QE process nextval
+				 * it sends NOTIFY to QD and asks QD to send nextval back to
+				 * QE, we probably got here because getting nextval on QD is
+				 * failed, QD send '?' message back to QE and cancel all
+				 * unfinished QEs, if the QE receives cancel before '?' message,
+				 * the message will stay in the socket, next time when we ReadCommand
+				 * we should ignore it.
+				 */
+				break;
 
 			default:
 				ereport(FATAL,
@@ -5724,7 +5832,7 @@ PostgresMain(int argc, char *argv[],
  * message was received, and is used to construct the error message.
  */
 static void
-forbidden_in_wal_sender(char firstchar)
+forbidden_in_wal_sender(int firstchar)
 {
 	if (am_walsender)
 	{
@@ -5965,23 +6073,9 @@ disable_statement_timeout(void)
 }
 
 /*
- * GPDB: Enable the IdleGangTimeoutHandler to disconnect and destroy idle
- * cdbgang processes.
+ * Whether request on cancel or termination have arrived?
  */
-void
-enable_client_wait_timeout_interrupt(void)
-{
-	if (DoingCommandRead)
-		EnableClientWaitTimeoutInterrupt();
-}
-
-/*
- * GPDB: Disable the IdleGangTimeoutHandler to prevent disconnecting and
- * destroying idle cdbgang processes.
- */
-void
-disable_client_wait_timeout_interrupt(void)
-{
-	if (DoingCommandRead)
-		DisableClientWaitTimeoutInterrupt();
+inline bool
+CancelRequested() {
+	return InterruptPending && (ProcDiePending || QueryCancelPending);
 }

@@ -172,7 +172,7 @@ CArrayCmpTest:
 ArrayConcat ArrayRef FoldedArrayCmp ArrayCmpAll
 UDA-AnyArray InClauseWithMCV CastedInClauseWithMCV FilterScalarCast
 IN-Nulls-ArrayCmpAny ArrayCmp-IN-ManyElements ArrayCmpAnyEmpty ArrayCmpAllEmpty
-ArrayCmpAnyEmptyLessThan;
+ArrayCmpAnyEmptyLessThan ArrayCmpAll-Disjunct;
 
 CCTEPropertiesTest:
 CTE-PushProperties CTE-NoPushProperties;
@@ -223,6 +223,13 @@ NLJ-Broadcast-DPE-Outer-Child PartTbl-MultiWayJoinWithDPE PartTbl-MultiWayJoinWi
 PartTbl-LeftOuterHashJoin-DPE-IsNull PartTbl-LeftOuterNLJoin-DPE-IsNull
 PartTbl-List-DPE-Int-Predicates JoinOrderDPE;
 
+CPartTblSPETest:
+PartTbl-SPE-DynamicTableScan-Range-Cost1 PartTbl-SPE-DynamicTableScan-Range-Cost2
+PartTbl-SPE-DynamicTableScan-Range-Cost3 PartTbl-SPE-DynamicTableScan-Range-Cost4
+PartTbl-SPE-DynamicTableScan-Range-Cost5 PartTbl-SPE-DynamicTableScan-List-Cost1
+PartTbl-SPE-DynamicTableScan-List-Cost2 PartTbl-SPE-DynamicTableScan-List-Cost3
+PartTbl-SPE-DynamicTableScan-List-Cost4 PartTbl-SPE-DynamicTableScan-List-Cost5;
+
 CSetop1Test:
 ValueScanWithDuplicateAndSelfComparison PushGbBelowNaryUnionAll
 PushGbBelowNaryUnion-1 PushGbBelowNaryUnion-2 MS-UnionAll-1
@@ -254,7 +261,7 @@ COuterJoin1Test:
 ExpandNAryJoinGreedyWithLOJOnly NaryWithLojAndNonLojChilds LOJ_bb_mpph LOJ-Condition-False
 LeftJoin-With-Pred-On-Inner LeftJoin-With-Pred-On-Inner2
 LeftJoin-With-Col-Const-Pred LeftJoin-With-Coalesce LOJWithFalsePred LeftJoin-DPv2-With-Select
-DPv2GreedyOnly DPv2MinCardOnly DPv2QueryOnly LOJ-PushDown;
+DPv2GreedyOnly DPv2MinCardOnly DPv2QueryOnly LOJ-PushDown LeftJoinDPv2JoinOrder;
 
 COuterJoin2Test:
 LOJ-IsNullPred Select-Proj-OuterJoin OuterJoin-With-OuterRefs Join-Disj-Subqs
@@ -269,7 +276,8 @@ LOJ_dont_convert_to_inner_with_outer_predicate_INDF_const LOJ-With-Agg
 LOJReorderWithComplexPredicate LOJReorderComplexNestedLOJs LOJReorderWithIDF
 LOJReorderWithNestedLOJAndFilter LOJReorderWithSimplePredicate LOJReorderWithOneSidedFilter
 LOJ-HashJoin-MultiDistKeys-WithComplexPreds LOJ_convert_to_inner_with_and_predicate
-LOJ_convert_to_inner_with_or_predicate LOJNonNullRejectingPredicates LOJNullRejectingPredicates;
+LOJ_convert_to_inner_with_or_predicate LOJNonNullRejectingPredicates LOJNullRejectingPredicates
+LOJNullRejectingZeroPlacePredicates;
 
 CFullJoinTest:
 FOJ-Condition-False ExpandFullOuterJoin ExpandFullOuterJoin2 FullOuterJoin-NullRejectingLHS1 FullOuterJoin-NullRejectingLHS2
@@ -338,7 +346,7 @@ Distinct-LegacyOpfamily;
 
 CSubquery2Test:
 Subq2PartialDecorrelate Subq2CorrSQInLOJOn Subq2NotInWhereLOJ Subq2OuterRef2InJoin Subq2OuterRefMultiLevelInOn
-Index-Join-With-Subquery-In-Pred;
+Index-Join-With-Subquery-In-Pred NestedSubqLimitBindings;
 
 CIndexOnlyScanTest:
 IndexOnlyScan-NoDistKeyInIndex;
@@ -491,6 +499,7 @@ add_orca_test(CColRefSetIterTest)
 add_orca_test(CColRefSetTest)
 add_orca_test(CConstraintTest)
 add_orca_test(CContradictionTest)
+add_orca_test(CLogicalGbAggTest)
 add_orca_test(CCorrelatedExecutionTest)
 add_orca_test(CDecorrelatorTest)
 add_orca_test(CDistributionSpecTest)
@@ -499,6 +508,7 @@ add_orca_test(CConstTblGetTest)
 add_orca_test(CScalarIsDistinctFromTest)
 
 add_orca_test(CSubqueryHandlerTest)
+add_orca_test(CXformRightOuterJoin2HashJoinTest)
 
 add_orca_test(CBindingTest)
 add_orca_test(CEngineTest)

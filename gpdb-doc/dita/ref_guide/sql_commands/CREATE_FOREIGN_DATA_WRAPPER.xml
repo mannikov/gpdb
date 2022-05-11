@@ -7,10 +7,10 @@
         <p id="sql_command_desc">Defines a new foreign-data wrapper.</p>
         <section id="section2">
             <title>Synopsis</title>
-            <codeblock id="sql_command_synopsis">CREATE FOREIGN DATA WRAPPER <varname>name</varname>
-    [ HANDLER <varname>handler_function</varname> | NO HANDLER ]
-    [ VALIDATOR <varname>validator_function</varname> | NO VALIDATOR ]
-    [ OPTIONS ( [ mpp_execute { 'master' | 'any' | 'all segments' } [, ] ] <varname>option</varname> '<varname>value</varname>' [, ... ] ) ]</codeblock>
+            <codeblock id="sql_command_synopsis">CREATE FOREIGN DATA WRAPPER &lt;name>
+    [ HANDLER &lt;handler_function> | NO HANDLER ]
+    [ VALIDATOR &lt;validator_function> | NO VALIDATOR ]
+    [ OPTIONS ( [ mpp_execute { 'master' | 'any' | 'all segments' } [, ] ] &lt;option> '&lt;value>' [, ... ] ) ]</codeblock>
         </section>
         <section id="section3">
             <title>Description</title>
@@ -50,21 +50,25 @@
                 <plentry>
                     <pt>mpp_execute { 'master' | 'any' | 'all segments' }</pt>
                     <pd>
-                        <p>An option that identifies the host from which the foreign data-wrapper
-                            requests data: <ul id="ul_zcg_2vd_mgb">
-                                <li><codeph>master</codeph> (the default)—Request data from the
+                        <p>An option that identifies the host from which the foreign-data wrapper
+                            reads or writes data: <ul id="ul_zcg_2vd_mgb">
+                                <li><codeph>master</codeph> (the default)—Read or write data from the
                                     master host.</li>
-                                <li><codeph>any</codeph>—Request data from either the master host or
+                                <li><codeph>any</codeph>—Read data from either the master host or
                                     any one segment, depending on which path costs less.</li>
-                                <li><codeph>all segments</codeph>—Request data from all segments. To
-                                    support this option value, the foreign data-wrapper must have a
-                                    policy that matches the segments to data.</li>
+                                <li><codeph>all segments</codeph>—Read or write data from all segments. To
+                                    support this option value, the foreign-data wrapper must have a
+                                    policy that matches the segments to data.
+                                  <note>Greenplum Database supports parallel writes to foreign tables
+                                   only when you set <codeph>mpp_execute 'all segments'</codeph>.</note></li>
                             </ul></p>
+                        <p>Support for the foreign-data wrapper <codeph>mpp_execute</codeph> option,
+                            and the specific modes, is foreign-data wrapper-specific.</p>
                         <p>The <codeph>mpp_execute</codeph> option can be specified in multiple
                             commands: <codeph>CREATE FOREIGN TABLE</codeph>, <codeph>CREATE
                                 SERVER</codeph>, and <codeph>CREATE FOREIGN DATA WRAPPER</codeph>.
                             The foreign table setting takes precedence over the foreign server
-                            setting, followed by the foreign data wrapper setting.</p>
+                            setting, followed by the foreign-data wrapper setting.</p>
                     </pd>
                 </plentry>
             </parml>
@@ -86,13 +90,13 @@
         </section>
         <section id="section8">
             <title>See Also</title>
-            <p><codeph><xref href="ALTER_FOREIGN_DATA_WRAPPER.xml#topic1">ALTER FOREIGN DATA WRAPPER</xref></codeph>,
-                        <codeph><xref href="DROP_FOREIGN_DATA_WRAPPER.xml#topic1">DROP
-                    FOREIGN DATA WRAPPER</xref></codeph>,
-                        <codeph><xref href="CREATE_SERVER.xml#topic1">CREATE
-                    SERVER</xref></codeph>,
-                        <codeph><xref href="CREATE_USER_MAPPING.xml#topic1">CREATE
-                    USER MAPPING</xref></codeph></p>
+            <p><xref href="ALTER_FOREIGN_DATA_WRAPPER.xml#topic1">ALTER FOREIGN DATA WRAPPER</xref>,
+                        <xref href="DROP_FOREIGN_DATA_WRAPPER.xml#topic1">DROP
+                    FOREIGN DATA WRAPPER</xref>,
+                        <xref href="CREATE_SERVER.xml#topic1">CREATE
+                    SERVER</xref>,
+                        <xref href="CREATE_USER_MAPPING.xml#topic1">CREATE
+                    USER MAPPING</xref></p>
         </section>
     </body>
 </topic>

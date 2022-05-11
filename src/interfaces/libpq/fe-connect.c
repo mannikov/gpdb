@@ -317,16 +317,9 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	 * parameters have no effect on non-SSL connections, so there is no reason
 	 * to exclude them since none of them are mandatory.
 	 */
-#ifndef FRONTEND
-	/* Internal QD to QE communications don't use SSL */
-	{"sslmode", "PGSSLMODE", "disable", NULL,
-		"SSL-Mode", "", 8,		/* sizeof("disable") == 8 */
-	offsetof(struct pg_conn, sslmode)},
-#else
 	{"sslmode", "PGSSLMODE", DefaultSSLMode, NULL,
 		"SSL-Mode", "", 12,		/* sizeof("verify-full") == 12 */
 	offsetof(struct pg_conn, sslmode)},
-#endif
 
 	{"sslcompression", "PGSSLCOMPRESSION", "0", NULL,
 		"SSL-Compression", "", 1,
@@ -395,6 +388,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 	{GPCONN_TYPE, NULL, NULL, NULL,
 		"connection type", "D", 10,
 	offsetof(struct pg_conn, gpconntype)},
+
+	{"diff_options", NULL, NULL, NULL,
+		"updated synced GUCs", "D", 80,
+	offsetof(struct pg_conn, diffoptions)},
 
 	/* Terminating entry --- MUST BE LAST */
 	{NULL, NULL, NULL, NULL,
@@ -2424,7 +2421,7 @@ keep_going:						/* We will come back to here until there is
 		if (conn->gpconntype &&
 			(strcmp(conn->gpconntype, GPCONN_TYPE_FTS) == 0 ||
 			 strcmp(conn->gpconntype, GPCONN_TYPE_FAULT) == 0 ||
-			 strcmp(conn->gpconntype, GPCONN_TYPE_INTERNAL) == 0))
+			 strcmp(conn->gpconntype, GPCONN_TYPE_DEFAULT) == 0))
 		{
 			/*
 			 * GPDB uses the high bits of the major version to indicate special
@@ -2432,8 +2429,8 @@ keep_going:						/* We will come back to here until there is
 			 */
 			conn->pversion = GPDB_INTERNAL_PROTOCOL(3, 0);
 
-			/* hide the internal gpconntype option, let it only affect the pversion */
-			if (strcmp(conn->gpconntype, GPCONN_TYPE_INTERNAL) == 0)
+			/* hide the default gpconntype option, let it only affect the pversion */
+			if (strcmp(conn->gpconntype, GPCONN_TYPE_DEFAULT) == 0)
 			{
 				free(conn->gpconntype);
 				conn->gpconntype = NULL;

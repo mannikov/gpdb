@@ -222,6 +222,7 @@ public:
 		ExfExpandDynamicGetWithExternalPartitions____removed,
 		ExfLeftJoin2RightJoin,
 		ExfRightOuterJoin2HashJoin,
+		ExfImplementInnerJoin,
 		ExfInvalid,
 		ExfSentinel = ExfInvalid
 	};
@@ -308,6 +309,9 @@ public:
 	// equality function over xform ids
 	static BOOL FEqualIds(const CHAR *szIdOne, const CHAR *szIdTwo);
 
+	// returns a set containing all xforms related to nl join
+	// caller takes ownership of the returned set
+	static CBitSet *PbsNLJoinXforms(CMemoryPool *mp);
 
 	// returns a set containing all xforms related to index join
 	// caller takes ownership of the returned set
@@ -352,8 +356,8 @@ operator<<(IOstream &os, CXform &xform)
 }
 
 // shorthands for enum sets and iterators of xform ids
-typedef CEnumSet<CXform::EXformId, CXform::ExfSentinel> CXformSet;
-typedef CEnumSetIter<CXform::EXformId, CXform::ExfSentinel> CXformSetIter;
+using CXformSet = CEnumSet<CXform::EXformId, CXform::ExfSentinel>;
+using CXformSetIter = CEnumSetIter<CXform::EXformId, CXform::ExfSentinel>;
 }  // namespace gpopt
 
 

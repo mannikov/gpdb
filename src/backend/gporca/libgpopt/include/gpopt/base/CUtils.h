@@ -240,9 +240,9 @@ public:
 	static CScalarAggFunc *PopAggFunc(
 		CMemoryPool *mp, IMDId *pmdidAggFunc, const CWStringConst *pstrAggFunc,
 		BOOL is_distinct, EAggfuncStage eaggfuncstage, BOOL fSplit,
-		IMDId *pmdidResolvedReturnType =
-			nullptr	 // return type to be used if original return type is ambiguous
-	);
+		IMDId *
+			pmdidResolvedReturnType,  // return type to be used if original return type is ambiguous
+		EAggfuncKind aggkind, ULongPtrArray *argtypes);
 
 	// generate an aggregate function
 	static CExpression *PexprAggFunc(CMemoryPool *mp, IMDId *pmdidAggFunc,
@@ -939,6 +939,9 @@ public:
 	// return true if the given expression is a cross join
 	static BOOL FCrossJoin(CExpression *pexpr);
 
+	// return true if can create hash join for the expression
+	static BOOL IsHashJoinPossible(CMemoryPool *mp, CExpression *pexpr);
+
 	// is this scalar expression an NDV-preserving function (used for join stats derivation)
 	static BOOL IsExprNDVPreserving(CExpression *pexpr,
 									const CColRef **underlying_colref);
@@ -976,9 +979,8 @@ public:
 };	// class CUtils
 
 // hash set from expressions
-typedef CHashSet<CExpression, CExpression::UlHashDedup, CUtils::Equals,
-				 CleanupRelease<CExpression> >
-	ExprHashSet;
+using ExprHashSet = CHashSet<CExpression, CExpression::UlHashDedup,
+							 CUtils::Equals, CleanupRelease<CExpression>>;
 
 
 //---------------------------------------------------------------------------

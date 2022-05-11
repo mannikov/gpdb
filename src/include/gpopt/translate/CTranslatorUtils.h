@@ -35,6 +35,7 @@ extern "C" {
 #include "naucrates/dxl/operators/CDXLLogicalTVF.h"
 #include "naucrates/dxl/operators/CDXLPhysicalDML.h"
 #include "naucrates/dxl/operators/CDXLPhysicalMotion.h"
+#include "naucrates/dxl/operators/CDXLScalarAggref.h"
 #include "naucrates/dxl/operators/CDXLScalarSubPlan.h"
 #include "naucrates/md/CMDRelationGPDB.h"
 #include "naucrates/md/IMDType.h"
@@ -260,6 +261,9 @@ public:
 	static BOOL IsReferencedInWindowSpec(const TargetEntry *target_entry,
 										 List *window_clause_list);
 
+	// check if the project list contains AggRef with ORDER BY
+	static BOOL HasOrderedAggRefInProjList(CDXLNode *proj_list_dxlnode);
+
 	// extract a matching target entry that is a window spec
 	static TargetEntry *GetWindowSpecTargetEntry(Node *node,
 												 List *window_clause_list,
@@ -373,6 +377,12 @@ public:
 
 	// return the count of non-system columns in the relation
 	static ULONG GetNumNonSystemColumns(const IMDRelation *mdrel);
+
+	// return agg kind as an EdxlAggrefKind
+	static EdxlAggrefKind GetAggKind(CHAR aggkind);
+
+	// return agg kind as a CHAR
+	static CHAR GetAggKind(EdxlAggrefKind aggkind);
 };
 }  // namespace gpdxl
 

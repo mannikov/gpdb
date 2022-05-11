@@ -62,6 +62,7 @@
 #include "executor/executor.h"
 #include "executor/nodeShareInputScan.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
@@ -69,6 +70,7 @@
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/tuplestore.h"
+#include "port/atomics.h"
 
 /*
  * In a cross-slice ShareinputScan, the producer and consumer processes
@@ -100,8 +102,8 @@ typedef struct shareinput_Xslice_state
 	shareinput_tag tag;			/* hash key */
 
 	int			refcount;		/* reference count of this entry */
-	bool		ready;			/* is the input fully materialized and ready to be read? */
-	int			ndone;			/* # of consumers that have finished the scan */
+	pg_atomic_uint32	ready;	/* is the input fully materialized and ready to be read? */
+	pg_atomic_uint32	ndone;	/* # of consumers that have finished the scan */
 
 	/*
 	 * ready_done_cv is used for signaling when the scan becomes "ready", and
@@ -239,6 +241,20 @@ init_tuplestore_state(ShareInputScanState *node)
 				tuplestore_make_shared(ts,
 									   get_shareinput_fileset(),
 									   rwfile_prefix);
+#ifdef FAULT_INJECTOR
+				if (SIMPLE_FAULT_INJECTOR("sisc_xslice_temp_files") == FaultInjectorTypeSkip)
+				{
+					const char *filename = tuplestore_get_buffilename(ts);
+					if (!filename)
+						ereport(NOTICE, (errmsg("sisc_xslice: buffilename is null")));
+					else if (strstr(filename, "base/" PG_TEMP_FILES_DIR) == filename)
+						ereport(NOTICE, (errmsg("sisc_xslice: Use default tablespace")));
+					else if (strstr(filename, "pg_tblspc/") == filename)
+						ereport(NOTICE, (errmsg("sisc_xslice: Use temp tablespace")));
+					else
+						ereport(NOTICE, (errmsg("sisc_xslice: Unexpected prefix of the tablespace path")));
+				}
+#endif
 			}
 			else
 			{
@@ -349,6 +365,15 @@ ExecShareInputScan(PlanState *pstate)
 	/* if first time call, need to initialize the tuplestore state.  */
 	if (!node->isready)
 		init_tuplestore_state(node);
+	
+	/*
+	 * Return NULL when necessary.
+	 * This could help improve performance, especially when tuplestore is huge, because ShareInputScan 
+	 * do not need to read tuple from tuplestore when discard_output is true, which means current 
+	 * ShareInputScan is one but not the last one of Sequence's subplans.
+	 */
+	if (sisc->discard_output)
+	  return NULL;
 
 	slot = node->ss.ps.ps_ResultTupleSlot;
 
@@ -454,7 +479,17 @@ ExecInitShareInputScan(ShareInputScan *node, EState *estate, int eflags)
 	}
 
 	local_state = list_nth(estate->es_sharenode, node->share_id);
-	local_state->nsharers++;
+
+	/*
+	 * To accumulate the number of CTE consumers executed in this slice.
+	 * This variable will be used by the last finishing CTE consumer
+	 * in current slice, to wake the corresponding CTE producer up for
+	 * cleaning the materialized tuplestore, during squelching.
+	 */
+	if (currentSliceId == node->this_slice_id &&
+		currentSliceId != node->producer_slice_id)
+		local_state->nsharers++;
+
 	if (childState)
 		local_state->childState = childState;
 	sisstate->local_state = local_state;
@@ -677,7 +712,7 @@ ShareInputShmemInit(void)
 	{
 		HASHCTL		info;
 
-		// GPDB_12_MERGE_FIXME: would be nicer to store this hash in the DSM segment
+		/* GPDB_12_MERGE_FIXME: would be nicer to store this hash in the DSM segment or DSA */
 		info.keysize = sizeof(shareinput_tag);
 		info.entrysize = sizeof(shareinput_Xslice_state);
 
@@ -785,8 +820,8 @@ get_shareinput_reference(int share_id)
 		}
 
 		xslice_state->refcount = 0;
-		xslice_state->ready = false;
-		xslice_state->ndone = 0;
+		pg_atomic_init_u32(&xslice_state->ready, 0);
+		pg_atomic_init_u32(&xslice_state->ndone, 0);
 
 		ConditionVariableInit(&xslice_state->ready_done_cv);
 	}
@@ -885,24 +920,18 @@ shareinput_reader_waitready(shareinput_Xslice_reference *ref)
 	/*
 	 * Wait until the the producer sets 'ready' to true. The producer will
 	 * use the condition variable to wake us up.
-	 *
-	 * No need to hold ShareInputScanLock while we examine state->ready. It's
-	 * a boolean so it's either true or false.
-	 *
-	 * XXX: The ConditionVariablePrepareToSleep() is supposedly not needed, but
-	 * I saw mysterious hangs without it. Maybe we're missing a fix from
-	 * upstream? Or perhaps the condition variable machinery loses track of
-	 * which conditin variable we're prepared on, because the slots in shared
-	 * memory containing the condition variable are recycled. Not sure what
-	 * exactly is going on, but with the PrepareToSleep() and CancelSleep()
-	 * calls this works.
-	 * GPDB_12_MERGE_FIXME: check if that still happens after the v12 merge.
 	 */
-	ConditionVariablePrepareToSleep(&state->ready_done_cv);
-	while (!state->ready)
+	for (;;)
 	{
-		/* GPDB_12_MERGE_FIXME: Create a new WaitEventIPC member for this? */
-		ConditionVariableSleep(&state->ready_done_cv, 0);
+		/*
+		 * set state->ready via pg_atomic_exchange_u32() in shareinput_writer_notifyready()
+		 * it acts as a memory barrier, so always get the latest value here
+		 */
+		int ready = pg_atomic_read_u32(&state->ready);
+		if (ready)
+			break;
+
+		ConditionVariableSleep(&state->ready_done_cv, WAIT_EVENT_SHAREINPUT_SCAN);
 	}
 	ConditionVariableCancelSleep();
 
@@ -923,9 +952,12 @@ shareinput_writer_notifyready(shareinput_Xslice_reference *ref)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
 
-	/* we're the only writer, so no need to acquire the lock. */
-	Assert(!state->ready);
-	state->ready = true;
+	uint32 old_ready = pg_atomic_exchange_u32(&state->ready, 1);
+	Assert(old_ready == 0);
+
+#ifdef FAULT_INJECTOR
+	SIMPLE_FAULT_INJECTOR("shareinput_writer_notifyready");
+#endif
 
 	ConditionVariableBroadcast(&state->ready_done_cv);
 
@@ -945,12 +977,7 @@ static void
 shareinput_reader_notifydone(shareinput_Xslice_reference *ref, int nconsumers)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
-	int		ndone;
-
-	LWLockAcquire(ShareInputScanLock, LW_EXCLUSIVE);
-	state->ndone++;
-	ndone = state->ndone;
-	LWLockRelease(ShareInputScanLock);
+	int ndone = pg_atomic_add_fetch_u32(&state->ndone, 1);
 
 	/* If we were the last consumer, wake up the producer. */
 	if (ndone >= nconsumers)
@@ -973,25 +1000,24 @@ shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
 
-	if (!state->ready)
+	int ready = pg_atomic_read_u32(&state->ready);
+	if (!ready)
 		elog(ERROR, "shareinput_writer_waitdone() called without creating the tuplestore");
 
 	ConditionVariablePrepareToSleep(&state->ready_done_cv);
 	for (;;)
 	{
-		int			ndone;
-
-		LWLockAcquire(ShareInputScanLock, LW_SHARED);
-		ndone = state->ndone;
-		LWLockRelease(ShareInputScanLock);
-
+		/*
+		 * set state->ndone via pg_atomic_add_fetch_u32() in shareinput_reader_notifydone()
+		 * it acts as a memory barrier, so always get the latest value here
+		 */
+		int	ndone = pg_atomic_read_u32(&state->ndone);
 		if (ndone < nconsumers)
 		{
 			elog(DEBUG1, "SISC WRITER (shareid=%d, slice=%d): waiting for DONE message from %d / %d readers",
 				 ref->share_id, currentSliceId, nconsumers - ndone, nconsumers);
 
-			/* GPDB_12_MERGE_FIXME: Create a new WaitEventIPC member for this? */
-			ConditionVariableSleep(&state->ready_done_cv, 0);
+			ConditionVariableSleep(&state->ready_done_cv, WAIT_EVENT_SHAREINPUT_SCAN);
 
 			continue;
 		}

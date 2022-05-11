@@ -161,6 +161,11 @@ tablespace-setup:
         ./testtablespace_1111111111222222222233333333334444444444555555555566666666667777777777888888888899999999990000000000/ \
 	./testtablespace_default_tablespace \
 	./testtablespace_temp_tablespace \
+	./testtablespace_mytempsp0 \
+	./testtablespace_mytempsp1 \
+	./testtablespace_mytempsp2 \
+	./testtablespace_mytempsp3 \
+	./testtablespace_mytempsp4 \
 	./testtablespace_database_tablespace
 
 
@@ -208,6 +213,9 @@ else
 installcheck-icudp: all tablespace-setup
 	$(pg_regress_installcheck) $(REGRESS_OPTS) --schedule=$(srcdir)/icudp_schedule --dbname=regression_icudp $(EXTRA_TESTS)
 endif
+
+installcheck-mirrorless: all tablespace-setup
+	$(pg_regress_installcheck) $(REGRESS_OPTS) --schedule=$(srcdir)/mirrorless_schedule --dbname=regress-mirrorless $(EXTRA_TESTS)
 
 standbycheck: all
 	$(pg_regress_installcheck) $(REGRESS_OPTS) --schedule=$(srcdir)/standby_schedule  $(EXTRA_TESTS)

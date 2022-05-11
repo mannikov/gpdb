@@ -150,6 +150,7 @@
 #include "cdb/cdbgang.h"                /* cdbgang_parse_gpqeid_params */
 #include "cdb/cdbtm.h"
 #include "cdb/cdbvars.h"
+#include "cdb/cdbendpoint.h"
 #include "cdb/ic_proxy_bgworker.h"
 #include "utils/metrics_utils.h"
 
@@ -2070,6 +2071,19 @@ ServerLoop(void)
 			AbortStartTime != 0 &&
 			(now - AbortStartTime) >= SIGKILL_CHILDREN_AFTER_SECS)
 		{
+#ifdef FAULT_INJECTOR
+			if (SIMPLE_FAULT_INJECTOR("postmaster_server_loop_no_sigkill") == FaultInjectorTypeSkip)
+			{
+				/* 
+				 * This prevents sending SIGKILL to child processes for testing purpose.
+				 * Since each time hitting this fault will print a log, let's wait 0.1s just 
+				 * not to overwhelm the logs. Reaching here means we are shutting down so 
+				 * making postmaster slower should be OK (only for testing anyway).
+				 */
+				pg_usleep(100000L); 
+				continue;
+			}
+#endif
 			/* We were gentle with them before. Not anymore */
 			TerminateChildren(SIGKILL);
 			/* reset flag so we don't SIGKILL again */
@@ -2482,6 +2496,10 @@ retry1:
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							 errmsg("invalid value for option: \"%s\"", GPCONN_TYPE)));
 			}
+			else if (strcmp(nameptr, "diff_options") == 0)
+			{
+				port->diff_options = pstrdup(valptr);
+			}
 			else
 			{
 				/* Assume it's a generic GUC option */
@@ -2594,7 +2612,7 @@ retry1:
 	 * can make sense to first make a basebackup and then stream changes
 	 * starting from that.
 	 */
-	if ((am_walsender && !am_db_walsender) || am_ftshandler || IsFaultHandler)
+	if ((am_walsender && !am_db_walsender) || am_ftshandler || am_faulthandler)
 		port->database_name[0] = '\0';
 
 	/*
@@ -2616,7 +2634,7 @@ retry1:
 	switch (port->canAcceptConnections)
 	{
 		case CAC_STARTUP:
-			if ((am_ftshandler || IsFaultHandler) && am_mirror)
+			if ((am_ftshandler || am_faulthandler) && am_mirror)
 				break;
 
 			recptr = last_xlog_replay_location();
@@ -2641,6 +2659,11 @@ retry1:
 					 errdetail(POSTMASTER_IN_RECOVERY_DETAIL_MSG " %X/%X",
 						   (uint32) (recptr >> 32), (uint32) recptr)));
 			break;
+		case CAC_RESET:
+			ereport(FATAL,
+					(errcode(ERRCODE_CANNOT_CONNECT_NOW),
+					 errmsg(POSTMASTER_IN_RESET_MSG)));
+			break;
 		case CAC_TOOMANY:
 			ereport(FATAL,
 					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
@@ -2651,7 +2674,7 @@ retry1:
 			Assert(port->canAcceptConnections != CAC_WAITBACKUP);
 			break;
 		case CAC_MIRROR_READY:
-			if (am_ftshandler || IsFaultHandler)
+			if (am_ftshandler || am_faulthandler)
 			{
 				/* Even if the connection state is MIRROR_READY, the role
 				 * may change to primary during promoting. Hence, we need
@@ -2691,7 +2714,7 @@ retry1:
 	}
 
 #ifdef FAULT_INJECTOR
-	if (!am_ftshandler && !IsFaultHandler && !am_walsender &&
+	if (!am_ftshandler && !am_faulthandler && !am_walsender &&
 		FaultInjector_InjectFaultIfSet("process_startup_packet",
 									   DDLNotSpecified,
 									   port->database_name /* databaseName */,
@@ -2849,8 +2872,14 @@ canAcceptConnections(void)
 		else if (!FatalError &&
 				 pmState == PM_HOT_STANDBY)
 			result = CAC_OK;	/* connection OK during hot standby */
-		else
+		else if (pmState == PM_STARTUP || pmState == PM_RECOVERY)
 			return CAC_RECOVERY;	/* else must be crash recovery */
+		else
+			/* 
+			 * otherwise must be resetting: could be PM_WAIT_BACKENDS, 
+			 * PM_WAIT_DEAD_END or PM_NO_CHILDREN.
+			 */
+			return CAC_RESET;
 	}
 
 	/*
@@ -4845,7 +4874,7 @@ BackendInitialize(Port *port)
 	else if (am_ftshandler)
 		init_ps_display("fts handler process", port->user_name, remote_ps_data,
 						update_process_title ? "authentication" : "");
-	else if (IsFaultHandler)
+	else if (am_faulthandler)
 		init_ps_display("fault handler process", port->user_name, remote_ps_data,
 						update_process_title ? "authentication" : "");
 	else

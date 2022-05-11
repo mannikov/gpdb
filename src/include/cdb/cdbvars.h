@@ -31,6 +31,7 @@
 #ifndef PRIO_MAX
 #define PRIO_MAX 20
 #endif
+
 /*
  * Parameters gp_role
  *
@@ -254,6 +255,15 @@ extern int  gp_dtx_recovery_prepared_period;
 
 extern int gp_gang_creation_retry_count; /* How many retries ? */
 extern int gp_gang_creation_retry_timer; /* How long between retries */
+
+/* GUCs to control TCP keepalive settings for dispatch libpq connections */
+extern int 			gp_dispatch_keepalives_idle;
+extern int			gp_dispatch_keepalives_interval;
+extern int			gp_dispatch_keepalives_count;
+
+#define MAX_GP_DISPATCH_KEEPALIVES_IDLE 32767 /* Linux MAX_TCP_KEEPIDLE */
+#define MAX_GP_DISPATCH_KEEPALIVES_INTERVAL 32767 /* Linux MAX_TCP_KEEPINTVL */
+#define MAX_GP_DISPATCH_KEEPALIVES_COUNT 127 /* Linux MAX_TCP_KEEPCNT */
 
 /*
  * Parameter Gp_max_packet_size
@@ -646,6 +656,9 @@ extern int gp_workfile_bytes_to_checksum;
 
 extern bool coredump_on_memerror;
 
+/* Greenplum resource group query_mem re-calculate on QE */
+extern bool gp_resource_group_enable_recalculate_query_mem;
+
 /*
  * Autostats feature, whether or not to to automatically run ANALYZE after 
  * insert/delete/update/ctas or after ctas/copy/insert in case the target
@@ -663,6 +676,7 @@ typedef enum
 extern int	gp_autostats_mode;
 extern int	gp_autostats_mode_in_functions;
 extern int	gp_autostats_on_change_threshold;
+extern bool	gp_autostats_allow_nonowner;
 extern bool	log_autostats;
 
 
@@ -734,5 +748,14 @@ extern bool gp_create_table_random_default_distribution;
 
 /* Functions in guc_gp.c to lookup values in enum GUCs */
 extern const char * lookup_autostats_mode_by_value(GpAutoStatsModeValue val);
+
+/* notification condition name of next value, used in PGnotify */
+#define CDB_NOTIFY_NEXTVAL "nextval"
+
+/*
+ * notification condition name of endpoint ack information. Used in PGnotify
+ * for parallel retrieve cursor.
+ */
+#define CDB_NOTIFY_ENDPOINT_ACK "ack_notify"
 
 #endif   /* CDBVARS_H */

@@ -26,6 +26,7 @@
 #include "cdb/cdbpathlocus.h"
 #include "cdb/cdbutil.h"
 #include "cdb/cdbvars.h"		/* GpIdentity.segindex */
+#include "cdb/cdbendpoint.h"
 #include "cdb/memquota.h"
 #include "libpq/pqformat.h"		/* pq_beginmessage() etc. */
 #include "miscadmin.h"
@@ -1085,32 +1086,8 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 	instr->total = ntuples.max_total;
 	INSTR_TIME_ASSIGN(instr->firststart, ntuples.firststart_of_max_total);
 
-	/* Put winner's stats into qDisp PlanState's Instrument node. */
 	/*
-	 * GPDB_12_MERGE_FIXME: does it make sense to also print 'nfiltered1'
-	 * 'nfiltered2' from the "winner", i.e. the QE that returned most rows?
-	 * There's this test case in the upstream 'partition_prune' test:
-	 *
-	 * explain (analyze, costs off, summary off, timing off) select * from list_part where a = list_part_fn(1) + a;
-	 *                       QUERY PLAN                      
-	 * ------------------------------------------------------
-	 *  Append (actual rows=0 loops=1)
-	 *    ->  Seq Scan on list_part1 (actual rows=0 loops=1)
-	 *          Filter: (a = (list_part_fn(1) + a))
-	 *          Rows Removed by Filter: 1
-	 *    ->  Seq Scan on list_part2 (actual rows=0 loops=1)
-	 *          Filter: (a = (list_part_fn(1) + a))
-	 *          Rows Removed by Filter: 1
-	 *    ->  Seq Scan on list_part3 (actual rows=0 loops=1)
-	 *          Filter: (a = (list_part_fn(1) + a))
-	 *          Rows Removed by Filter: 1
-	 *    ->  Seq Scan on list_part4 (actual rows=0 loops=1)
-	 *          Filter: (a = (list_part_fn(1) + a))
-	 *          Rows Removed by Filter: 1
-	 * (13 rows)
-	 *
-	 * We don't print those "Rows Removed by Filter" rows in GPDB, because
-	 * they don't come from the "winner" QE.
+	 * Put winner's stats into qDisp PlanState's Instrument node.
 	 */
 	if (ntuples.agg.vcnt > 0)
 	{
@@ -2092,4 +2069,64 @@ show_motion_keys(PlanState *planstate, List *hashExpr, int nkeys, AttrNumber *ke
 	    exprstr = deparse_expression((Node *)hashExpr, context, useprefix, true);
 		ExplainPropertyText("Hash Key", exprstr, es);
     }
+}
+
+/*
+ * Explain a parallel retrieve cursor,
+ * indicate the endpoints exist on entry DB, or on some segments,
+ * or on all segments.
+ */
+void ExplainParallelRetrieveCursor(ExplainState *es, QueryDesc* queryDesc)
+{
+	PlannedStmt *plan = queryDesc->plannedstmt;
+	SliceTable *sliceTable = queryDesc->estate->es_sliceTable;
+	StringInfoData            endpointInfoStr;
+	enum EndPointExecPosition endPointExecPosition;
+
+	initStringInfo(&endpointInfoStr);
+
+	endPointExecPosition = GetParallelCursorEndpointPosition(plan);
+	ExplainOpenGroup("Cursor", "Cursor", true, es);
+	switch(endPointExecPosition)
+	{
+		case ENDPOINT_ON_ENTRY_DB:
+		{
+			appendStringInfo(&endpointInfoStr, "\"on coordinator\"");
+			break;
+		}
+		case ENDPOINT_ON_SINGLE_QE:
+		{
+			appendStringInfo(
+							 &endpointInfoStr, "\"on segment: contentid [%d]\"",
+							 gp_session_id % plan->planTree->flow->numsegments);
+			break;
+		}
+		case ENDPOINT_ON_SOME_QE:
+		{
+			ListCell * cell;
+			bool isFirst = true;
+			appendStringInfo(&endpointInfoStr, "on segments: contentid [");
+			ExecSlice *slice = &sliceTable->slices[0];
+			foreach(cell, slice->segments)
+			{
+				int contentid = lfirst_int(cell);
+				appendStringInfo(&endpointInfoStr, (isFirst)?"%d":", %d", contentid);
+				isFirst = false;
+			}
+			appendStringInfo(&endpointInfoStr, "]");
+			break;
+		}
+		case ENDPOINT_ON_ALL_QE:
+		{
+			appendStringInfo(&endpointInfoStr, "on all %d segments", getgpsegmentCount());
+			break;
+		}
+		default:
+		{
+			elog(ERROR, "invalid endpoint position : %d", endPointExecPosition);
+			break;
+		}
+	}
+	ExplainPropertyText("Endpoint", endpointInfoStr.data, es);
+	ExplainCloseGroup("Cursor", "Cursor", true, es);
 }

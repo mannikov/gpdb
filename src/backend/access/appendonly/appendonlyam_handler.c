@@ -847,15 +847,11 @@ appendonly_vacuum_rel(Relation onerel, VacuumParams *params,
 					  BufferAccessStrategy bstrategy)
 {
 	/*
-	 * GPDB_12_MERGE_FIXME: This is a dummy function in order to proceed with
-	 * the implementation of the appendonlyam_handler.
-	 *
-	 * It's not invoked ever, we do the AO different phases vacuuming in
-	 * vacuum_rel() directly for now.
-	 *
-	 * A snipped implementation exists in appendonly_vacuum.c which would need
-	 * to get revived here.
+	 * Implemented but not invoked, we do the AO_ROW different phases vacuuming by
+	 * calling ao_vacuum_rel() in vacuum_rel() directly for now.
 	 */
+	ao_vacuum_rel(onerel, params, bstrategy);
+	
 	return;
 }
 
@@ -1778,9 +1774,17 @@ appendonly_estimate_rel_size(Relation rel, int32 *attr_widths,
 	UnregisterSnapshot(snapshot);
 
 	/*
-	 * GPDB_12_MERGE_FIXME: Do not bother scanning the visimap aux table.
-	 * Investigate if really needed
+	 * Do not bother scanning the visimap aux table.
+	 * Investigate if really needed.
+	 * 
+	 * For Heap table, visibility map may help to estimate
+	 * the number of page fetches can be avoided during an
+	 * index-only scan. That is not the case for AO/AOCS table
+	 * since index-only scan hasn't been used with AO/AOCS.
+	 * So leave the comment here for future reference once
+	 * we have a clear requirement to do that.
 	 */
+
 	return;
 }
 

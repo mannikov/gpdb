@@ -144,6 +144,9 @@ _copyPlannedStmt(const PlannedStmt *from)
 
 	COPY_SCALAR_FIELD(query_mem);
 
+	COPY_SCALAR_FIELD(total_memory_coordinator);
+	COPY_SCALAR_FIELD(nsegments_coordinator);
+
 	COPY_NODE_FIELD(intoClause);
 	COPY_NODE_FIELD(copyIntoClause);
 	COPY_NODE_FIELD(refreshClause);
@@ -161,6 +164,7 @@ _copyQueryDispatchDesc(const QueryDispatchDesc *from)
 	COPY_NODE_FIELD(oidAssignments);
 	COPY_NODE_FIELD(cursorPositions);
 	COPY_SCALAR_FIELD(useChangedAOOpts);
+	COPY_SCALAR_FIELD(secContext);
 	COPY_NODE_FIELD(paramInfo);
 
 	return newnode;
@@ -4032,6 +4036,18 @@ _copyFetchStmt(const FetchStmt *from)
 	return newnode;
 }
 
+static RetrieveStmt*
+_copyRetrieveStmt(const RetrieveStmt *from)
+{
+	RetrieveStmt *newnode = makeNode(RetrieveStmt);
+
+	COPY_STRING_FIELD(endpoint_name);
+	COPY_SCALAR_FIELD(count);
+	COPY_SCALAR_FIELD(is_all);
+
+	return newnode;
+}
+
 static IndexStmt *
 _copyIndexStmt(const IndexStmt *from)
 {
@@ -4954,6 +4970,7 @@ _copyLockStmt(const LockStmt *from)
 	COPY_NODE_FIELD(relations);
 	COPY_SCALAR_FIELD(mode);
 	COPY_SCALAR_FIELD(nowait);
+	COPY_SCALAR_FIELD(coordinatoronly);
 
 	return newnode;
 }
@@ -6243,6 +6260,9 @@ copyObjectImpl(const void *from)
 			break;
 		case T_FetchStmt:
 			retval = _copyFetchStmt(from);
+			break;
+		case T_RetrieveStmt:
+			retval = _copyRetrieveStmt(from);
 			break;
 		case T_IndexStmt:
 			retval = _copyIndexStmt(from);

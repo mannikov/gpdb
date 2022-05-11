@@ -75,6 +75,7 @@
 #include "utils/workfile_mgr.h"
 #include "utils/faultinjector.h"
 #include "utils/resource_manager.h"
+#include "utils/resgroup-ops.h"
 
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_class.h"
@@ -106,7 +107,11 @@
 #include "cdb/memquota.h"
 #include "cdb/cdbtargeteddispatch.h"
 #include "cdb/cdbutil.h"
+#include "cdb/cdbendpoint.h"
 
+#define IS_PARALLEL_RETRIEVE_CURSOR(queryDesc)	(queryDesc->ddesc &&	\
+										queryDesc->ddesc->parallelCursorName &&	\
+										strlen(queryDesc->ddesc->parallelCursorName) > 0)
 
 /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */
 ExecutorStart_hook_type ExecutorStart_hook = NULL;
@@ -206,6 +211,7 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	GpExecIdentity exec_identity;
 	bool		shouldDispatch;
 	bool		needDtx;
+	List 		*toplevelOidCache = NIL;
 
 	/* sanity checks: queryDesc must not be started already */
 	Assert(queryDesc != NULL);
@@ -220,9 +226,6 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	if (query_info_collect_hook)
 		(*query_info_collect_hook)(METRICS_QUERY_START, queryDesc);
 
-	/**
-	 * Distribute memory to operators.
-	 */
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
 		if (!IsResManagerMemoryPolicyNone() &&
@@ -231,12 +234,75 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			elog(GP_RESMANAGER_MEMORY_LOG_LEVEL, "query requested %.0fKB of memory",
 				 (double) queryDesc->plannedstmt->query_mem / 1024.0);
 		}
+	}
 
-		/**
-		 * There are some statements that do not go through the resource queue, so we cannot
-		 * put in a strong assert here. Someday, we should fix resource queues.
+	/**
+	 * Distribute memory to operators.
+	 *
+	 * There are some statements that do not go through the resource queue, so we cannot
+	 * put in a strong assert here. Someday, we should fix resource queues.
+	 */
+	if (queryDesc->plannedstmt->query_mem > 0)
+	{
+		/*
+		 * Whether we should skip operator memory assignment
+		 * - We should never skip operator memory assignment on QD.
+		 * - On QE, not skip in case of resource group enabled, and customer allow QE re-calculate query_mem,
+		 * as the GUC `gp_resource_group_enable_recalculate_query_mem` set to on.
 		 */
-		if (queryDesc->plannedstmt->query_mem > 0)
+		bool	should_skip_operator_memory_assign = true;
+
+		if (Gp_role == GP_ROLE_EXECUTE)
+		{
+			/*
+			 * If resource group is enabled, we should re-calculate query_mem on QE, because the memory
+			 * of the coordinator and segment nodes or the number of instance could be different.
+			 *
+			 * On QE, we only try to recalculate query_mem if resource group enabled. Otherwise, we will skip this
+			 * and the next operator memory assignment if resource queue enabled
+			 */
+			if (IsResGroupEnabled())
+			{
+				int 	total_memory_coordinator = queryDesc->plannedstmt->total_memory_coordinator;
+				int    	nsegments_coordinator = queryDesc->plannedstmt->nsegments_coordinator;
+
+				/*
+				 * memSpill is not in fallback mode, and we enable resource group re-calculate the query_mem on QE,
+				 * then re-calculate the query_mem and re-compute operatorMemKB using this new value
+				 */
+				if (total_memory_coordinator != 0 && nsegments_coordinator != 0)
+				{
+					should_skip_operator_memory_assign = false;
+
+					/* Get total system memory on the QE in MB */
+					int 	total_memory_segment = ResGroupOps_GetTotalMemory();
+					int 	nsegments_segment = ResGroupGetSegmentNum();
+					uint64	coordinator_query_mem = queryDesc->plannedstmt->query_mem;
+
+					/*
+					 * In the resource group environment, when we calculate query_mem, we can roughly use the following
+					 * formula:
+					 *
+					 * 	query_mem = (total_memory * gp_resource_group_memory_limit * memory_limit / nsegments) * memory_spill_ratio / concurrency
+					 *
+					 * Only total_memory and nsegments could differ between QD and QE, so query_mem is proportional to
+					 * the system's available virtual memory and inversely proportional to the number of instances.
+					 */
+					queryDesc->plannedstmt->query_mem *= (total_memory_segment * 1.0 / nsegments_segment) /
+														 (total_memory_coordinator * 1.0 / nsegments_coordinator);
+
+					elog(DEBUG1, "re-calculate query_mem, original QD's query_mem: %.0fKB, after recalculation QE's query_mem: %.0fKB",
+						 (double) coordinator_query_mem / 1024.0  , (double) queryDesc->plannedstmt->query_mem / 1024.0);
+				}
+			}
+		}
+		else
+		{
+			/* On QD, we always traverse the plan tree and compute operatorMemKB */
+			should_skip_operator_memory_assign = false;
+		}
+
+		if (!should_skip_operator_memory_assign)
 		{
 			switch(*gp_resmanager_memory_policy)
 			{
@@ -581,45 +647,23 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			 *
 			 * For details please see github issue https://github.com/greenplum-db/gpdb/issues/10760
 			 */
-			List *toplevelOidCache = NIL;
 			if (queryDesc->ddesc != NULL)
 			{
 				queryDesc->ddesc->sliceTable = estate->es_sliceTable;
-				toplevelOidCache = GetAssignedOidsForDispatch();
+				/*
+				 * For CTAS querys that contain initplan, we need to copy a new oid dispatch list,
+				 * since the preprocess_initplan will start a subtransaction, and if it's rollbacked,
+				 * the memory context of 'Oid dispatch context' will be reset, which will cause invalid
+				 * list reference during the serialization of dispatch_oids when dispatching plan.
+				 */
+				toplevelOidCache = copyObject(GetAssignedOidsForDispatch());
 			}
 
 			/*
 			 * First, pre-execute any initPlan subplans.
 			 */
 			if (list_length(queryDesc->plannedstmt->paramExecTypes) > 0)
-			{
-				ParamListInfoData *pli = queryDesc->params;
-
-				/*
-				 * First, use paramFetch to fetch any "lazy" parameters, so that
-				 * they are dispatched along with the queries. The QE nodes cannot
-				 * call the callback function on their own.
-				 */
-				if (pli && pli->paramFetch)
-				{
-					int			iparam;
-
-					for (iparam = 0; iparam < queryDesc->params->numParams; iparam++)
-					{
-						ParamExternData *prm = &pli->params[iparam];
-						ParamExternData prmdata;
-
-						/*
-						 * GPDB_12_MERGE_FIXME: What should speculative value
-						 * should paramFetch be called with?
-						 */
-						if (!OidIsValid(prm->ptype))
-							(*pli->paramFetch) (pli, iparam + 1, false, &prmdata);
-					}
-				}
-
 				preprocess_initplans(queryDesc);
-			}
 
 			if (toplevelOidCache != NIL)
 			{
@@ -640,6 +684,12 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 				CdbDispatchPlan(queryDesc,
 								estate->es_param_exec_vals,
 								needDtx, true);
+			}
+
+			if (toplevelOidCache != NIL)
+			{
+				list_free(toplevelOidCache);
+				toplevelOidCache = NIL;
 			}
 		}
 
@@ -701,6 +751,11 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 	PG_CATCH();
 	{
+		if (toplevelOidCache != NIL)
+		{
+			list_free(toplevelOidCache);
+			toplevelOidCache = NIL;
+		}
 		mppExecutorCleanup(queryDesc);
 		PG_RE_THROW();
 	}
@@ -773,6 +828,8 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	DestReceiver *dest;
 	bool		sendTuples;
 	MemoryContext oldcontext;
+	bool		endpointCreated = false;
+
 	/*
 	 * NOTE: Any local vars that are set in the PG_TRY block and examined in the
 	 * PG_CATCH block should be declared 'volatile'. (setjmp shenanigans)
@@ -892,22 +949,60 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 		}
 		else if (exec_identity == GP_ROOT_SLICE)
 		{
+			DestReceiver *endpointDest;
+
 			/*
-			 * Run a root slice
-			 * It corresponds to the "normal" path through the executor
-			 * in that we enter the plan at the top and count on the
-			 * motion nodes at the fringe of the top slice to return
-			 * without ever calling nodes below them.
+			 * When run a root slice, and it is a PARALLEL RETRIEVE CURSOR, it means
+			 * QD become the end point for connection. It is true, for
+			 * instance, SELECT * FROM foo LIMIT 10, and the result should
+			 * go out from QD.
+			 *
+			 * For the scenario: endpoint on QE, the query plan is changed,
+			 * the root slice also exists on QE.
 			 */
-			ExecutePlan(estate,
-						queryDesc->planstate,
-						queryDesc->plannedstmt->parallelModeNeeded,
-						operation,
-						sendTuples,
-						count,
-						direction,
-						dest,
-						execute_once);
+			if (IS_PARALLEL_RETRIEVE_CURSOR(queryDesc))
+			{
+				SetupEndpointExecState(queryDesc->tupDesc,
+									   queryDesc->ddesc->parallelCursorName,
+									   operation,
+									   &endpointDest);
+				endpointCreated = true;
+
+				/*
+				 * Once the endpoint has been created in shared memory, send acknowledge
+				 * message to QD so DECLARE PARALLEL RETRIEVE CURSOR statement can finish.
+				 */
+				EndpointNotifyQD(ENDPOINT_READY_ACK_MSG);
+
+				ExecutePlan(estate,
+							queryDesc->planstate,
+							queryDesc->plannedstmt->parallelModeNeeded,
+							operation,
+							true,
+							count,
+							direction,
+							endpointDest,
+							execute_once);
+			}
+			else
+			{
+				/*
+				 * Run a root slice
+				 * It corresponds to the "normal" path through the executor
+				 * in that we enter the plan at the top and count on the
+				 * motion nodes at the fringe of the top slice to return
+				 * without ever calling nodes below them.
+				 */
+				ExecutePlan(estate,
+							queryDesc->planstate,
+							queryDesc->plannedstmt->parallelModeNeeded,
+							operation,
+							sendTuples,
+							count,
+							direction,
+							dest,
+							execute_once);
+			}
 		}
 		else
 		{
@@ -953,6 +1048,9 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	/*
 	 * shutdown tuple receiver, if we started it
 	 */
+	if (endpointCreated)
+		DestroyEndpointExecState();
+
 	if (sendTuples)
 		dest->rShutdown(dest);
 
@@ -1617,29 +1715,6 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		ResultRelInfo *resultRelInfos;
 		ResultRelInfo *resultRelInfo;
 
-		/*
-		 * MPP-2879: The QEs don't pass their MPPEXEC statements through
-		 * the parse (where locks would ordinarily get acquired). So we
-		 * need to take some care to pick them up here (otherwise we get
-		 * some very strange interactions with QE-local operations (vacuum?
-		 * utility-mode ?)).
-		 *
-		 * NOTE: There is a comment in lmgr.c which reads forbids use of
-		 * heap_open/relation_open with "NoLock" followed by use of
-		 * RelationOidLock/RelationLock with a stronger lock-mode:
-		 * RelationOidLock/RelationLock expect a relation to already be
-		 * locked.
-		 *
-		 * But we also need to serialize CMD_UPDATE && CMD_DELETE to preserve
-		 * order on mirrors.
-		 *
-		 * So we're going to ignore the "NoLock" issue above.
-		 */
-
-		/* CDB: we must promote locks for UPDATE and DELETE operations for ao table. */
-		LOCKMODE    lockmode;
-		lockmode = (Gp_role != GP_ROLE_EXECUTE || Gp_is_writer) ? RowExclusiveLock : NoLock;
-
 		resultRelInfos = (ResultRelInfo *)
 			palloc(numResultRelations * sizeof(ResultRelInfo));
 		resultRelInfo = resultRelInfos;
@@ -1712,12 +1787,6 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	}
 
 	/*
-	 * set the number of partition selectors for every dynamic scan id
-	 */
-	// GPDB_12_MERGE_FIXME
-	//estate->dynamicTableScanInfo->numSelectorsPerScanId = plannedstmt->numSelectorsPerScanId;
-
-	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
 	 */
 	if (plannedstmt->rowMarks)
@@ -1742,10 +1811,6 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 			switch (rc->markType)
 			{
 				/*
-				 * GPDB_12_MERGE_FIXME: We lost the GPDB change that this comment
-				 * talks about in the merge. I'm not sure where it should go now.
-				 * In ExecGetRangeTableRelation maybe?
-				 *
 				 * Greenplum specific behavior:
 				 * The implementation of select statement with locking clause
 				 * (for update | no key update | share | key share) in postgres

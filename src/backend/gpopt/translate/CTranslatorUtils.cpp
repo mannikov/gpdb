@@ -159,12 +159,9 @@ CTranslatorUtils::GetTableDescr(CMemoryPool *mp, CMDAccessor *md_accessor,
 		// the fact that catalog tables (master-only) are not analyzed often and will result in Orca producing
 		// inferior plans.
 
-		GPOS_THROW_EXCEPTION(
-			gpdxl::ExmaDXL,							 // major
-			gpdxl::ExmiQuery2DXLUnsupportedFeature,	 // minor
-			CException::
-				ExsevDebug1,  // ulSeverityLevel mapped to GPDB severity level
-			GPOS_WSZ_LIT("Queries on master-only tables"));
+		GPOS_THROW_EXCEPTION(gpdxl::ExmaDXL,						  // major
+							 gpdxl::ExmiQuery2DXLUnsupportedFeature,  // minor
+							 GPOS_WSZ_LIT("Queries on master-only tables"));
 	}
 
 	// add columns from md cache relation object to table descriptor
@@ -1743,6 +1740,32 @@ CTranslatorUtils::IsSortingColumn(const TargetEntry *target_entry,
 	return false;
 }
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorUtils::HasOrderedAggRefInProjList
+//
+//	@doc:
+//		check if the project list contains AggRef with ORDER BY
+//---------------------------------------------------------------------------
+BOOL
+CTranslatorUtils::HasOrderedAggRefInProjList(CDXLNode *proj_list_dxlnode)
+{
+	GPOS_ASSERT(nullptr != proj_list_dxlnode &&
+				EdxlopScalarProjectList ==
+					proj_list_dxlnode->GetOperator()->GetDXLOperator());
+	const ULONG arity = proj_list_dxlnode->Arity();
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		CDXLNode *proj_elem_dxlnode = (*proj_list_dxlnode)[ul];
+		CDXLNode *dxlnode = (*proj_elem_dxlnode)[0];
+		if (dxlnode->GetOperator()->GetDXLOperator() == EdxlopScalarAggref &&
+			(*dxlnode)[EdxlscalaraggrefIndexAggOrder]->Arity() > 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -2124,7 +2147,7 @@ CTranslatorUtils::CreateDXLProjElemConstNULL(CMemoryPool *mp,
 	else if (mdid->Equals(&CMDIdGPDB::m_mdid_bool))
 	{
 		datum_dxl = GPOS_NEW(mp)
-			CDXLDatumBool(mp, mdid, true /*fConstNull*/, 0 /*value*/);
+			CDXLDatumBool(mp, mdid, true /*fConstNull*/, false /*value*/);
 	}
 	else if (mdid->Equals(&CMDIdGPDB::m_mdid_oid))
 	{
@@ -2395,6 +2418,56 @@ CTranslatorUtils::GetNumNonSystemColumns(const IMDRelation *rel)
 	}
 
 	return num_non_system_cols;
+}
+
+EdxlAggrefKind
+CTranslatorUtils::GetAggKind(CHAR aggkind)
+{
+	switch (aggkind)
+	{
+		case 'n':
+		{
+			return EdxlaggkindNormal;
+		}
+		case 'o':
+		{
+			return EdxlaggkindOrderedSet;
+		}
+		case 'h':
+		{
+			return EdxlaggkindHypothetical;
+		}
+		default:
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiExpr2DXLAttributeNotFound,
+					   GPOS_WSZ_LIT("Unknown aggkind value"));
+		}
+	}
+}
+
+CHAR
+CTranslatorUtils::GetAggKind(EdxlAggrefKind aggkind)
+{
+	switch (aggkind)
+	{
+		case EdxlaggkindNormal:
+		{
+			return 'n';
+		}
+		case EdxlaggkindOrderedSet:
+		{
+			return 'o';
+		}
+		case EdxlaggkindHypothetical:
+		{
+			return 'h';
+		}
+		default:
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2ExprAttributeNotFound,
+					   GPOS_WSZ_LIT("Unknown aggkind value"));
+		}
+	}
 }
 
 // EOF

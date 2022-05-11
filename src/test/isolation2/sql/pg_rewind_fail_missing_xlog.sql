@@ -31,6 +31,8 @@ INSERT INTO tst_missing_tbl values(2),(1),(5);
 0U: SELECT pg_switch_wal is not null FROM pg_switch_wal();
 1: INSERT INTO tst_missing_tbl values(2),(1),(5);
 
+-- Make sure primary/mirror pair is in sync, otherwise FTS can't promote mirror
+1: SELECT wait_until_all_segments_synchronized();
 -- Mark down the primary with content 0 via fts fault injection.
 1: SELECT gp_inject_fault_infinite('fts_handle_message', 'error', dbid) FROM gp_segment_configuration WHERE content = 0 AND role = 'p';
 
@@ -83,6 +85,10 @@ INSERT INTO tst_missing_tbl values(2),(1),(5);
 -- Stop the primary immediately and promote the mirror.
 3: SELECT pg_ctl(datadir, 'stop', 'immediate') FROM gp_segment_configuration WHERE role='p' AND content = 1;
 3: SELECT gp_request_fts_probe_scan();
+-- Wait for the end of recovery CHECKPOINT completed after the mirror was promoted
+3: SELECT gp_inject_fault('checkpoint_after_redo_calculated', 'skip', dbid) FROM gp_segment_configuration WHERE role='p' AND content = 1;
+3: SELECT gp_wait_until_triggered_fault('checkpoint_after_redo_calculated', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 1;
+3: SELECT gp_inject_fault('checkpoint_after_redo_calculated', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = 1;
 3: SELECT role, preferred_role from gp_segment_configuration where content = 1;
 
 4: INSERT INTO tst_missing_tbl values(2),(1),(5);

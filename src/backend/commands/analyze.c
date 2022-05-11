@@ -281,19 +281,34 @@ analyze_rel_internal(Oid relid, RangeVar *relation,
 #endif
 
 	/*
-	 * Check if relation needs to be skipped based on ownership.  This check
-	 * happens also when building the relation list to analyze for a manual
-	 * operation, and needs to be done additionally here as ANALYZE could
+	 * analyze_rel can be called in 3 different contexts:  explicitly by the user
+	 * (eg. ANALYZE, VACUUM ANALYZE), implicitly by autovacuum, or implicitly by
+	 * autostats.
+	 *
+	 * In the first case, we always want to make sure the user is the owner of the
+	 * table.  In the autovacuum case, it will be called as superuser so we don't
+	 * really care, but the ownership check should always succeed.  For autostats,
+	 * we only do the check if gp_autostats_allow_nonowner=false, otherwise we can
+	 * proceed with the analyze.
+	 *
+	 * This check happens also when building the relation list to analyze for a
+	 * manual operation, and needs to be done additionally here as ANALYZE could
 	 * happen across multiple transactions where relation ownership could have
 	 * changed in-between.  Make sure to generate only logs for ANALYZE in
 	 * this case.
 	 */
-	if (!vacuum_is_relation_owner(RelationGetRelid(onerel),
-								  onerel->rd_rel,
-								  params->options & VACOPT_ANALYZE))
+
+	if (!(params->auto_stats && gp_autostats_allow_nonowner))
 	{
-		relation_close(onerel, ShareUpdateExclusiveLock);
-		return;
+		if (!vacuum_is_relation_owner(RelationGetRelid(onerel),
+			onerel->rd_rel,
+		  params->options & VACOPT_ANALYZE))
+		{
+			{
+				relation_close(onerel, ShareUpdateExclusiveLock);
+				return;
+			}
+		}
 	}
 
 	/*
@@ -1518,13 +1533,13 @@ acquire_sample_rows(Relation onerel, int elevel,
 	 * Emit some interesting relation info
 	 */
 	ereport(elevel,
-	        (errmsg("\"%s\": scanned %d of %u pages, "
-	                "containing %.0f live rows and %.0f dead rows; "
-	                "%d rows in sample, %.0f estimated total rows",
-	                RelationGetRelationName(onerel),
-	                bs.m, totalblocks,
-	                liverows, deadrows,
-	                numrows, *totalrows)));
+		(errmsg("\"%s\": scanned %d of %u pages, "
+				"containing %.0f live rows and %.0f dead rows; "
+				"%d rows in sample, %.0f estimated total rows",
+				RelationGetRelationName(onerel),
+				bs.m, totalblocks,
+				liverows, deadrows,
+				numrows, *totalrows)));
 
 	return numrows;
 }
@@ -2156,9 +2171,9 @@ acquire_sample_rows_dispatcher(Relation onerel, bool inh, int elevel,
 	AttInMetadata *attinmeta;
 	StringInfoData str;
 	int			sampleTuples;	/* 32 bit - assume that number of tuples will not > 2B */
-	char 	  **funcRetValues;
-	bool 	   *funcRetNulls;
-	char 	  **values;
+	char	  **funcRetValues;
+	bool	   *funcRetNulls;
+	char	  **values;
 	int			numLiveColumns;
 	int			perseg_targrows;
 	int			ncolumns;
@@ -2220,7 +2235,7 @@ acquire_sample_rows_dispatcher(Relation onerel, bool inh, int elevel,
 	 * Execute it.
 	 */
 	elog(elevel, "Executing SQL: %s", str.data);
-	CdbDispatchCommand(str.data, DF_WITH_SNAPSHOT, &cdb_pgresults);
+	CdbDispatchCommand(str.data, DF_WITH_SNAPSHOT | DF_CANCEL_ON_ERROR, &cdb_pgresults);
 
 	/*
 	 * Build a modified tuple descriptor for the table.
@@ -2697,7 +2712,7 @@ std_typanalyze(VacAttrStats *stats)
 	if (get_rel_relkind(attr->attrelid) == RELKIND_PARTITIONED_TABLE &&
 		!get_rel_relispartition(attr->attrelid) &&
 		leaf_parts_analyzed(stats->attr->attrelid, InvalidOid, va_cols, stats->elevel) &&
-		op_hashjoinable(eqopr, stats->attrtypid))
+		((!OidIsValid(eqopr)) || op_hashjoinable(eqopr, stats->attrtypid)))
 	{
 		stats->merge_stats = true;
 		stats->compute_stats = merge_leaf_stats;
@@ -3773,14 +3788,19 @@ compute_scalar_stats(VacAttrStatsP stats,
 /*
  *	merge_leaf_stats() -- merge leaf stats for the root
  *
- *	We use this when we can find "=" and "<" operators for the datatype.
- *
  *	This is only used when the relation is the root partition and merges
  *	the statistics available in pg_statistic for the leaf partitions.
  *
- *	We determine the fraction of non-null rows, the average width, the
- *	most common values, the (estimated) number of distinct values, the
- *	distribution histogram.
+ *  We use this for two scenarios:
+ *
+ *	1. When we can find "=" and "<" operators for the datatype, and the
+ *	"=" operator is hashjoinable. In this case, we determine the fraction
+ *	of non-null rows, the average width, the most common values, the
+ *	(estimated) number of distinct values, the distribution histogram.
+ *
+ *	2. When we can find neither "=" nor "<" operator for the data type. In
+ *	this case, we only determine the fraction of non-null rows and the
+ *	average width.
  */
 static void
 merge_leaf_stats(VacAttrStatsP stats,
@@ -4147,10 +4167,15 @@ merge_leaf_stats(VacAttrStatsP stats,
 	pfree(nDistincts);
 	pfree(nMultiples);
 
-	if (allDistinct || (!OidIsValid(eqopr) && !OidIsValid(ltopr)))
+	if (allDistinct)
 	{
 		/* If we found no repeated values, assume it's a unique column */
 		ndistinct = -1.0;
+	}
+	else if (!OidIsValid(eqopr) && !OidIsValid(ltopr))
+	{
+		/* If operators are not available, NDV is unknown. */
+		ndistinct = 0;
 	}
 	else if ((int) nmultiple >= (int) ndistinct)
 	{

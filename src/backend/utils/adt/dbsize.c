@@ -596,9 +596,20 @@ calculate_table_size(Relation rel)
 			if (!OidIsValid(auxRelIds[i]))
 				continue;
 
-			auxRel = try_relation_open(auxRelIds[i], AccessShareLock, false);
-			size += calculate_total_relation_size(auxRel);
-			relation_close(auxRel, AccessShareLock);
+			if ((auxRel = try_relation_open(auxRelIds[i], AccessShareLock, false)) != NULL)
+			{
+				size += calculate_total_relation_size(auxRel);
+				relation_close(auxRel, AccessShareLock);
+			}
+			else
+			{
+				/*
+				 * This error may occur when the auxiliary relations' records of
+				 * the appendonly table are corrupted.
+				 */
+				elog(ERROR, "invalid auxiliary relation oid %u for appendonly relation '%s'",
+							auxRelIds[i], rel->rd_rel->relname.data);
+			}
 		}
 	}
 
@@ -1122,6 +1133,9 @@ pg_relation_filenode(PG_FUNCTION_ARGS)
 		case RELKIND_INDEX:
 		case RELKIND_SEQUENCE:
 		case RELKIND_TOASTVALUE:
+		case RELKIND_AOSEGMENTS:
+		case RELKIND_AOBLOCKDIR:
+		case RELKIND_AOVISIMAP:
 			/* okay, these have storage */
 			if (relform->relfilenode)
 				result = relform->relfilenode;

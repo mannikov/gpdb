@@ -74,6 +74,7 @@
 #include "cdb/cdbllize.h"
 #include "cdb/cdbmutate.h"		/* apply_shareinput */
 #include "cdb/cdbpath.h"		/* cdbpath_segments */
+#include "cdb/cdbpathtoplan.h"
 #include "cdb/cdbpullup.h"
 #include "cdb/cdbgroup.h"
 #include "cdb/cdbgroupingpaths.h"		/* create_grouping_paths() extensions */
@@ -355,11 +356,14 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	 * applies to non-QD master slices.  Furthermore, ORCA doesn't currently
 	 * support pl/<lang> statements (relevant when they are planned on the segments).
 	 * For these reasons, restrict to using ORCA on the master QD processes only.
+	 *
+	 * PARALLEL RETRIEVE CURSOR is not supported by ORCA yet.
 	 */
 	if (optimizer &&
 		GP_ROLE_DISPATCH == Gp_role &&
 		IS_QUERY_DISPATCHER() &&
-		(cursorOptions & CURSOR_OPT_SKIP_FOREIGN_PARTITIONS) == 0)
+		(cursorOptions & CURSOR_OPT_SKIP_FOREIGN_PARTITIONS) == 0 &&
+		(cursorOptions & CURSOR_OPT_PARALLEL_RETRIEVE) == 0)
 	{
 		if (gp_log_optimization_time)
 			INSTR_TIME_SET_CURRENT(starttime);
@@ -393,6 +397,10 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	glob = makeNode(PlannerGlobal);
 
 	glob->boundParams = boundParams;
+	glob->is_parallel_cursor = !!(cursorOptions & CURSOR_OPT_PARALLEL_RETRIEVE);
+	if (glob->is_parallel_cursor && Gp_role != GP_ROLE_DISPATCH)
+		ereport(ERROR, (errcode(ERRCODE_GP_COMMAND_ERROR),
+						errmsg("Parallel retrieve cursor should run on the dispatcher only")));
 	glob->subplans = NIL;
 	glob->subroots = NIL;
 	glob->rewindPlanIDs = NULL;
@@ -545,6 +553,8 @@ standard_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	}
 
 	top_plan = create_plan(root, best_path, top_slice);
+	/* Decorate the top node of the plan with a Flow node. */
+	top_plan->flow = cdbpathtoplan_create_flow(root, best_path->locus);
 
 	/*
 	 * If creating a plan for a scrollable cursor, make sure it can run
@@ -2917,10 +2927,11 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		 * allows the cost of the Motion to be taken into account when
 		 * deciding which path is the cheapest.
 		 */
-		if (CdbPathLocus_IsHashed(root->final_locus) ||
+		if ((CdbPathLocus_IsHashed(root->final_locus) ||
 			CdbPathLocus_IsSingleQE(root->final_locus) ||
 			CdbPathLocus_IsEntry(root->final_locus) ||
-			CdbPathLocus_IsReplicated(root->final_locus))
+			CdbPathLocus_IsReplicated(root->final_locus)) &&
+			!root->glob->is_parallel_cursor)
 		{
 			Path	   *orig_path = path;
 

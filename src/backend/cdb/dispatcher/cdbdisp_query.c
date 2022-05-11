@@ -26,6 +26,7 @@
 #include "cdb/cdbmutate.h"
 #include "cdb/cdbsrlz.h"
 #include "cdb/tupleremap.h"
+#include "catalog/namespace.h" /* for GetTempNamespaceState() */
 #include "nodes/execnodes.h"
 #include "pgstat.h"
 #include "tcop/tcopprot.h"
@@ -36,6 +37,7 @@
 #include "utils/faultinjector.h"
 #include "utils/resgroup.h"
 #include "utils/resource_manager.h"
+#include "utils/resgroup-ops.h"
 #include "utils/session_state.h"
 #include "utils/typcache.h"
 #include "miscadmin.h"
@@ -263,6 +265,21 @@ CdbDispatchPlan(struct QueryDesc *queryDesc,
 	if (queryDesc->extended_query)
 	{
 		verify_shared_snapshot_ready(gp_command_count);
+	}
+
+	/* In the final stage, add the resource information needed for QE by the resource group */
+	stmt->total_memory_coordinator = 0;
+	stmt->nsegments_coordinator = 0;
+
+	if (IsResGroupEnabled() && gp_resource_group_enable_recalculate_query_mem &&
+		memory_spill_ratio != RESGROUP_FALLBACK_MEMORY_SPILL_RATIO)
+	{
+		/*
+		 * We enable resource group re-calculate the query_mem on QE, and we are not in
+		 * fall back mode (use statement_mem).
+		 */
+		stmt->total_memory_coordinator = ResGroupOps_GetTotalMemory();
+		stmt->nsegments_coordinator = ResGroupGetSegmentNum();
 	}
 
 	cdbdisp_dispatchX(queryDesc, planRequiresTxn, cancelOnError);
@@ -556,6 +573,7 @@ cdbdisp_buildUtilityQueryParms(struct Node *stmt,
 	QueryDispatchDesc *qddesc;
 	PlannedStmt *pstmt;
 	DispatchCommandQueryParms *pQueryParms;
+	Oid	save_userid;
 
 	Assert(stmt != NULL);
 	Assert(stmt->type < 1000);
@@ -589,6 +607,7 @@ cdbdisp_buildUtilityQueryParms(struct Node *stmt,
 	{
 		qddesc = makeNode(QueryDispatchDesc);
 		qddesc->oidAssignments = oid_assignments;
+		GetUserIdAndSecContext(&save_userid, &qddesc->secContext);
 
 		serializedQueryDispatchDesc = serializeNode((Node *) qddesc, &serializedQueryDispatchDesc_len,
 													NULL /* uncompressed_size */ );
@@ -624,6 +643,7 @@ cdbdisp_buildPlanQueryParms(struct QueryDesc *queryDesc,
 				splan_len_uncompressed,
 				sddesc_len,
 				rootIdx;
+	Oid			save_userid;
 
 	rootIdx = RootSliceIndex(queryDesc->estate);
 
@@ -653,6 +673,7 @@ cdbdisp_buildPlanQueryParms(struct QueryDesc *queryDesc,
 
 	Assert(splan != NULL && splan_len > 0 && splan_len_uncompressed > 0);
 
+	GetUserIdAndSecContext(&save_userid, &queryDesc->ddesc->secContext);
 	sddesc = serializeNode((Node *) queryDesc->ddesc, &sddesc_len, NULL /* uncompressed_size */ );
 
 	pQueryParms->strCommand = queryDesc->sourceText;
@@ -862,6 +883,7 @@ buildGpQueryString(DispatchCommandQueryParms *pQueryParms,
 	Oid			currentUserId = GetUserId();
 	int32		numsegments = getgpsegmentCount();
 	StringInfoData resgroupInfo;
+	Oid			tempNamespaceId, tempToastNamespaceId;
 
 	int			tmp,
 				len;
@@ -913,7 +935,10 @@ buildGpQueryString(DispatchCommandQueryParms *pQueryParms,
 		sddesc_len +
 		sizeof(numsegments) +
 		sizeof(resgroupInfo.len) +
-		resgroupInfo.len;
+		resgroupInfo.len +
+		sizeof(tempNamespaceId) +
+		sizeof(tempToastNamespaceId) +
+		0;
 
 	shared_query = palloc(total_query_len);
 
@@ -1008,11 +1033,20 @@ buildGpQueryString(DispatchCommandQueryParms *pQueryParms,
 		pos += resgroupInfo.len;
 	}
 
-	len = pos - shared_query - 1;
+	/* in-process variable for temporary namespace */
+	GetTempNamespaceState(&tempNamespaceId, &tempToastNamespaceId);
+	tempNamespaceId = htonl(tempNamespaceId);
+	tempToastNamespaceId = htonl(tempToastNamespaceId);
+
+	memcpy(pos, &tempNamespaceId, sizeof(tempNamespaceId));
+	pos += sizeof(tempNamespaceId);
+	memcpy(pos, &tempToastNamespaceId, sizeof(tempToastNamespaceId));
+	pos += sizeof(tempToastNamespaceId);
 
 	/*
 	 * fill in length placeholder
 	 */
+	len = pos - shared_query - 1;
 	tmp = htonl(len);
 	memcpy(shared_query + 1, &tmp, sizeof(len));
 
@@ -1141,6 +1175,9 @@ cdbdisp_dispatchX(QueryDesc* queryDesc,
 					primaryGang->type == GANGTYPE_SINGLETON_READER ||
 					primaryGang->type == GANGTYPE_ENTRYDB_READER);
 
+		if (si == slice->rootIndex)
+			ds->rootGangSize = primaryGang->size;
+
 		if (Test_print_direct_dispatch_info)
 			elog(INFO, "(slice %d) Dispatch command to %s", slice->sliceIndex,
 						segmentsToContentStr(slice->segments));
@@ -1152,7 +1189,7 @@ cdbdisp_dispatchX(QueryDesc* queryDesc,
 		{
 			if (ds->primaryResults->errcode)
 				break;
-			if (InterruptPending)
+			if (CancelRequested())
 				break;
 		}
 		SIMPLE_FAULT_INJECTOR("before_one_slice_dispatched");

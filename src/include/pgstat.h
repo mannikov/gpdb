@@ -827,6 +827,7 @@ typedef enum BackendState
 #define PG_WAIT_RESOURCE_GROUP		0xA0000000U
 #define PG_WAIT_RESOURCE_QUEUE		0xA1000000U
 #define PG_WAIT_REPLICATION			0xA2000000U
+#define PG_WAIT_PARALLEL_RETRIEVE_CURSOR 0xA3000000U
 
 /* ----------
  * Wait Events - Activity
@@ -932,6 +933,7 @@ typedef enum
 	/* GPDB additions */
 	,
 	WAIT_EVENT_DTX_RECOVERY,
+	WAIT_EVENT_SHAREINPUT_SCAN,
 	WAIT_EVENT_INTERCONNECT
 } WaitEventIPC;
 
@@ -1602,7 +1604,7 @@ extern void pgstat_send_bgwriter(void);
 struct CdbDispatchResults;
 struct pg_result;
 extern void pgstat_send_qd_tabstats(void);								/* GPDB */
-extern void pgstat_combine_one_qe_result(Bitmapset **oidMap,			/* GPDB */
+extern void pgstat_combine_one_qe_result(List **oidList,           /* GPDB */
 										 struct pg_result *pgresult,
 										 int nest_level,
 										 int32 segindex);

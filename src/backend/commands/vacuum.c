@@ -116,7 +116,7 @@ static void vac_update_relstats_from_list(List *updated_stats);
  * happen in vacuum().
  */
 void
-ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
+ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel, bool auto_stats)
 {
 	VacuumParams params;
 	bool		verbose = false;
@@ -243,6 +243,8 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 
 	/* user-invoked vacuum never uses this parameter */
 	params.log_min_duration = -1;
+
+	params.auto_stats = auto_stats;
 
 	/* Now go through the common routine */
 	vacuum(vacstmt->rels, &params, NULL, isTopLevel);
@@ -2321,26 +2323,9 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
 			LockRelation(onerel, ShareLock);
 	}
 
-	/*
-	 * Do the actual work --- either FULL or "lazy" vacuum
-	 */
-	if (ao_vacuum_phase == VACOPT_AO_PRE_CLEANUP_PHASE)
-	{
-		ao_vacuum_rel_pre_cleanup(onerel, params->options, params, vac_strategy);
-	}
-	else if (ao_vacuum_phase == VACOPT_AO_COMPACT_PHASE)
-	{
-		ao_vacuum_rel_compact(onerel, params->options, params, vac_strategy);
-	}
-	else if (ao_vacuum_phase == VACOPT_AO_POST_CLEANUP_PHASE)
-	{
-		ao_vacuum_rel_post_cleanup(onerel, params->options, params, vac_strategy);
-	}
-	else if (is_appendoptimized)
-	{
-		/* Do nothing here, we will launch the stages later */
-		Assert(ao_vacuum_phase == 0);
-	}
+	if (is_appendoptimized)
+		/* entrance of vacuuming Append-Optimized table */
+		ao_vacuum_rel(onerel, params, vac_strategy);
 	else if ((params->options & VACOPT_FULL))
 	{
 		int			cluster_options = 0;

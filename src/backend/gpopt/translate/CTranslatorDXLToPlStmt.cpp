@@ -2584,6 +2584,13 @@ CTranslatorDXLToPlStmt::TranslateDXLAgg(
 			GPOS_ASSERT(!"Invalid aggregation strategy");
 	}
 
+	if (agg->aggstrategy == AGG_HASHED &&
+		CTranslatorUtils::HasOrderedAggRefInProjList(project_list_dxlnode))
+	{
+		GPOS_RAISE(gpopt::ExmaDXL, gpopt::ExmiExpr2DXLUnsupportedFeature,
+				   GPOS_WSZ_LIT("Hash aggregation with ORDER BY"));
+	}
+
 	agg->streaming = dxl_phy_agg_dxlop->IsStreamSafe();
 
 	// translate grouping cols
@@ -3649,6 +3656,7 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEProducerToSharedScan(
 	// create the shared input scan representing the CTE Producer
 	ShareInputScan *shared_input_scan = MakeNode(ShareInputScan);
 	shared_input_scan->share_id = cte_id;
+	shared_input_scan->discard_output = true;
 	Plan *plan = &(shared_input_scan->scan.plan);
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
 
@@ -3706,6 +3714,7 @@ CTranslatorDXLToPlStmt::TranslateDXLCTEConsumerToSharedScan(
 
 	ShareInputScan *share_input_scan_cte_consumer = MakeNode(ShareInputScan);
 	share_input_scan_cte_consumer->share_id = cte_id;
+	share_input_scan_cte_consumer->discard_output = false;
 
 	Plan *plan = &(share_input_scan_cte_consumer->scan.plan);
 	plan->plan_node_id = m_dxl_to_plstmt_context->GetNextPlanId();
@@ -3897,8 +3906,6 @@ CTranslatorDXLToPlStmt::TranslateDXLDml(
 	RangeTblEntry *rte = TranslateDXLTblDescrToRangeTblEntry(
 		table_descr, index, &base_table_context);
 	GPOS_ASSERT(nullptr != rte);
-	// GPDB_12_MERGE_FIXME: Make this an parameter in TranslateDXLTblDescrToRangeTblEntry
-	rte->rellockmode = RowExclusiveLock;
 	rte->requiredPerms |= acl_mode;
 	m_dxl_to_plstmt_context->AddRTE(rte, true);
 
@@ -4319,8 +4326,7 @@ CTranslatorDXLToPlStmt::TranslateDXLTblDescrToRangeTblEntry(
 	rte->relid = oid;
 	rte->checkAsUser = table_descr->GetExecuteAsUserId();
 	rte->requiredPerms |= ACL_NO_RIGHTS;
-	// GPDB_12_MERGE_FIXME: Make this an parameter
-	rte->rellockmode = AccessShareLock;
+	rte->rellockmode = table_descr->LockMode();
 
 	// save oid and range index in translation context
 	base_table_context->SetOID(oid);

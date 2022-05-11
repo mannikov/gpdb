@@ -296,6 +296,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 		CreateMatViewStmt RefreshMatViewStmt CreateAmStmt
 		CreatePublicationStmt AlterPublicationStmt
 		CreateSubscriptionStmt AlterSubscriptionStmt DropSubscriptionStmt
+		RetrieveStmt
 
 /* GPDB-specific commands */
 %type <node>	AlterTypeStmt AlterQueueStmt AlterResourceGroupStmt
@@ -357,6 +358,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 %type <str>		opt_type
 %type <str>		foreign_server_version opt_foreign_server_version
 %type <str>		opt_in_database
+%type <str>		opt_coordinatoronly
 
 %type <list>	OptQueueList
 %type <defelt>	OptQueueElem
@@ -724,7 +726,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 	DETACH DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
 	DOUBLE_P DROP
 
-	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
+	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENDPOINT ENUM_P ESCAPE EVENT EXCEPT
 	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN
 	EXTENSION EXTERNAL EXTRACT
 
@@ -767,7 +769,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF REFERENCES REFERENCING
 	REFRESH REINDEX RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
-	RESET RESTART RESTRICT RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
+	RESET RESTART RESTRICT RETRIEVE RETURNING RETURNS REVOKE RIGHT ROLE ROLLBACK ROLLUP
 	ROUTINE ROUTINES ROW ROWS RULE
 
 	SAVEPOINT SCHEMA SCHEMAS SCROLL SEARCH SECOND_P SECURITY SELECT SEQUENCE SEQUENCES
@@ -970,6 +972,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc ENCODING
 			%nonassoc ENCRYPTED
 			%nonassoc END_P
+			%nonassoc ENDPOINT
 			%nonassoc ENUM_P
 			%nonassoc ERRORS
 			%nonassoc EVERY
@@ -1057,6 +1060,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc OVERCOMMIT
 			%nonassoc OWNED
 			%nonassoc OWNER
+			%nonassoc PARALLEL
 			%nonassoc PARTIAL
 			%nonassoc PARTITIONS
 			%nonassoc PASSWORD
@@ -1089,6 +1093,7 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 			%nonassoc RESOURCE
 			%nonassoc RESTART
 			%nonassoc RESTRICT
+			%nonassoc RETRIEVE
 			%nonassoc RETURNS
 			%nonassoc REVOKE
 			%nonassoc ROLE
@@ -1398,6 +1403,7 @@ stmt :
 			| VariableSetStmt
 			| VariableShowStmt
 			| ViewStmt
+			| RetrieveStmt
 			| /*EMPTY*/
 				{ $$ = NULL; }
 		;
@@ -3253,6 +3259,13 @@ alter_table_cmd:
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
 					n->subtype = AT_ExpandTable;
+					$$ = (Node *)n;
+				}
+			/* ALTER TABLE <name> EXPAND PARTITION PREPARE*/
+			| EXPAND PARTITION PREPARE
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					n->subtype = AT_ExpandPartitionTablePrepare;
 					$$ = (Node *)n;
 				}
 			/* ALTER TABLE <name> OF <type_name> */
@@ -13686,13 +13699,25 @@ using_clause:
  *
  *****************************************************************************/
 
-LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait
+LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait opt_coordinatoronly
 				{
 					LockStmt *n = makeNode(LockStmt);
 
 					n->relations = $3;
 					n->mode = $4;
 					n->nowait = $5;
+					if ($6 != NULL)
+						n->coordinatoronly = true;
+					else
+						n->coordinatoronly = false;
+					if (n->coordinatoronly && n->mode != AccessShareLock)
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("provided lock mode is not supported for %s", $6),
+							 	errhint("Only ACCESS SHARE mode is supported for %s.", $6),
+								parser_errposition(@4)));
+					}
 					$$ = (Node *)n;
 				}
 		;
@@ -13721,6 +13746,10 @@ opt_nowait_or_skip:
 			| /*EMPTY*/						{ $$ = LockWaitBlock; }
 		;
 
+opt_coordinatoronly: MASTER ONLY					{ $$ = pstrdup("MASTER ONLY"); }
+		| COORDINATOR ONLY				{ $$ = pstrdup("COORDINATOR ONLY"); }
+		| /*EMPTY*/					{ $$ = NULL; }
+		;
 
 /*****************************************************************************
  *
@@ -13822,6 +13851,7 @@ cursor_options: /*EMPTY*/					{ $$ = 0; }
 			| cursor_options SCROLL			{ $$ = $1 | CURSOR_OPT_SCROLL; }
 			| cursor_options BINARY			{ $$ = $1 | CURSOR_OPT_BINARY; }
 			| cursor_options INSENSITIVE	{ $$ = $1 | CURSOR_OPT_INSENSITIVE; }
+			| cursor_options PARALLEL RETRIEVE	{ $$ = $1 | CURSOR_OPT_PARALLEL_RETRIEVE; }
 		;
 
 opt_hold: /* EMPTY */						{ $$ = 0; }
@@ -13876,6 +13906,24 @@ opt_hold: /* EMPTY */						{ $$ = 0; }
 
 SelectStmt: select_no_parens			%prec UMINUS
 			| select_with_parens		%prec UMINUS
+		;
+
+RetrieveStmt:
+			RETRIEVE SignedIconst FROM ENDPOINT name
+				{
+					RetrieveStmt *n = makeNode(RetrieveStmt);
+					n->endpoint_name = $5;
+					n->count = $2;
+					$$ = (Node *)n;
+				}
+			| RETRIEVE ALL FROM ENDPOINT name
+				{
+					RetrieveStmt *n = makeNode(RetrieveStmt);
+					n->endpoint_name = $5;
+					n->count = -1;
+					n->is_all = true;
+					$$ = (Node *)n;
+				}
 		;
 
 select_with_parens:
@@ -17937,6 +17985,7 @@ unreserved_keyword:
 			| ENABLE_P
 			| ENCODING
 			| ENCRYPTED
+			| ENDPOINT
 			| ENUM_P
 			| ERRORS
 			| ESCAPE
@@ -18100,6 +18149,7 @@ unreserved_keyword:
 			| RESOURCE
 			| RESTART
 			| RESTRICT
+			| RETRIEVE
 			| RETURNS
 			| REVOKE
 			| ROLE
@@ -18285,6 +18335,7 @@ PartitionIdentKeyword: ABORT_P
 			| ENABLE_P
 			| ENCODING
 			| ENCRYPTED
+			| ENDPOINT
 			| ERRORS
 			| ENUM_P
 			| ESCAPE
@@ -18368,6 +18419,7 @@ PartitionIdentKeyword: ABORT_P
 			| OVERCOMMIT
 			| OWNED
 			| OWNER
+			| PARALLEL
 			| PARTIAL
 			| PARTITIONS
 			| PASSWORD
@@ -19632,24 +19684,6 @@ greenplumLegacyAOoptions(const char *accessMethod, List **options)
 			amendedOptions = lappend(amendedOptions, elem);
 	}
 	*options = amendedOptions;
-
-	/* GPDB_12_MERGE_FIXME: during the development of the ao_row/column tableam we
-	 * need to have this layer turned off. When removing this fixme, make
-	 * certain that any sanity checks on the options are also introduced if
-	 * needed. Such examples can be:
-	 *
-	 *  if (strcmp(elem->defname, "appendoptimized") == 0 ||
-	 *      strcmp(elem->defname, "appendonly") == 0)
-	 *  {
-	 *      if ((strVal(elem->arg), "true") == 0)
-	 *   	{ options for true }
-	 *   	else if ((strVal(elem->arg), "false") == 0)
-	 *   	{ options for false }
-	 *   	else
-	 *   	{ ereport(....
-	 *  }
-	 *
-	 */
 
 	if (!appendoptimized && is_column_oriented_found)
 		ereport(ERROR,

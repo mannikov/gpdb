@@ -411,6 +411,7 @@ getCdbComponentInfo(void)
 		pRow->cdbs = component_databases;
 		pRow->config = config;
 		pRow->freelist = NIL;
+		pRow->activelist = NIL;
 		pRow->numIdleQEs = 0;
 		pRow->numActiveQEs = 0;
 
@@ -813,6 +814,7 @@ cdbcomponent_allocateIdleQE(int contentId, SegmentType segmentType)
 
 	cdbconn_setQEIdentifier(segdbDesc, -1);
 
+	cdbinfo->activelist = lcons(segdbDesc, cdbinfo->activelist);
 	INCR_COUNT(cdbinfo, numActiveQEs);
 
 	MemoryContextSwitchTo(oldContext);
@@ -878,6 +880,8 @@ cdbcomponent_recycleIdleQE(SegmentDatabaseDescriptor *segdbDesc, bool forceDestr
 	isWriter = segdbDesc->isWriter;
 
 	/* update num of active QEs */
+	Assert(list_member_ptr(cdbinfo->activelist, segdbDesc));
+	cdbinfo->activelist = list_delete_ptr(cdbinfo->activelist, segdbDesc);
 	DECR_COUNT(cdbinfo, numActiveQEs);
 
 	oldContext = MemoryContextSwitchTo(CdbComponentsContext);
@@ -1021,7 +1025,6 @@ ensureInterconnectAddress(void)
 	if (GpIdentity.segindex >= 0)
 	{
 		Assert(Gp_role == GP_ROLE_EXECUTE);
-		Assert(MyProcPort != NULL);
 		Assert(MyProcPort->laddr.addr.ss_family == AF_INET
 				|| MyProcPort->laddr.addr.ss_family == AF_INET6);
 		/*
@@ -1055,8 +1058,7 @@ ensureInterconnectAddress(void)
 		 */
 		interconnect_address = qdHostname;
 	}
-	else
-		Assert(false);
+	Assert(interconnect_address && strlen(interconnect_address) > 0);
 }
 /*
  * performs all necessary setup required for Greenplum Database mode.

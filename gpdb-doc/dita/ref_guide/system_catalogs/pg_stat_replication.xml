@@ -6,7 +6,7 @@
   <body>
     <p>The <codeph>pg_stat_replication</codeph> view contains metadata of the
         <codeph>walsender</codeph> process that is used for Greenplum Database master mirroring.</p>
-    <p>The <codeph><xref href="gp_stat_replication.xml#topic1"/></codeph> view contains
+    <p>The <xref href="gp_stat_replication.xml#topic1"/> view contains
         <codeph>walsender</codeph> replication information for master and segment mirroring.</p>
     <table id="op164584">
       <title>pg_catalog.pg_stat_replication</title>
@@ -55,6 +55,12 @@
             <entry colname="col4">Client IP address.</entry>
           </row>
           <row>
+            <entry><codeph>client_hostname</codeph></entry>
+            <entry>text</entry>
+            <entry/>
+            <entry>The host name of the client machine.</entry>
+          </row>
+          <row>
             <entry colname="col1"><codeph>client_port </codeph></entry>
             <entry colname="col2">integer</entry>
             <entry colname="col3"/>
@@ -65,6 +71,12 @@
             <entry colname="col2">timestamp </entry>
             <entry colname="col3"/>
             <entry colname="col4">Operation start timestamp. </entry>
+          </row>
+          <row>
+            <entry><codeph>backend_xmin</codeph></entry>
+            <entry>xid</entry>
+            <entry/>
+            <entry>The current backend's <codeph>xmin</codeph> horizon.</entry>
           </row>
           <row>
             <entry colname="col1"><codeph>state</codeph></entry>
