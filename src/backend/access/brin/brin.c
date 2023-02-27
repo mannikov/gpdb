@@ -360,6 +360,72 @@ brinbeginscan(Relation r, int nkeys, int norderbys)
 	return scan;
 }
 
+static BlockNumber
+brin_ao_tid_ranges(Relation rel, BlockNumber *aoblks)
+{
+	Snapshot	snapshot;
+	BlockNumber seg_start_blk;
+	BlockNumber nblocks = 0;
+    Oid			segrelid;
+	int64		lastSequence;
+	int			segnos[AOTupleId_MaxSegmentFileNum] = {0};
+    int			nsegs;
+
+	Assert(RelationIsValid(rel));
+
+	snapshot = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
+
+	if (RelationIsAoRows(rel))
+	{
+		FileSegInfo **seginfos = GetAllFileSegInfo(rel, snapshot, &nsegs, &segrelid);
+
+		Assert(nsegs <= AOTupleId_MaxSegmentFileNum);
+
+		for (int i = 0; i < nsegs; i++)
+			segnos[i] = seginfos[i]->segno;
+
+		if (seginfos != NULL)
+		{
+			FreeAllSegFileInfo(seginfos, nsegs);
+			pfree(seginfos);
+		}
+	}	
+	else
+	{
+		AOCSFileSegInfo **seginfos = GetAllAOCSFileSegInfo(rel, snapshot, &nsegs, &segrelid);
+
+		Assert(nsegs <= AOTupleId_MaxSegmentFileNum);
+
+		for (int i = 0; i < nsegs; i++)
+			segnos[i] = seginfos[i]->segno;
+
+		if (seginfos != NULL)
+		{
+			FreeAllAOCSSegFileInfo(seginfos, nsegs);
+			pfree(seginfos);
+		}
+	}
+
+	/* call ReadLastSequence() only for segnos corresponding to the target relation */
+    for (int i = -1, segno; i < nsegs; i++)
+    {
+        /* always initailize segment 0 */
+        segno = (i < 0 ? 0 : segnos[i]);
+        lastSequence = ReadLastSequence(segrelid, segno);
+
+        seg_start_blk = segnoGetCurrentAosegStart(segno);
+        aoblks[segno] = lastSequence / 32768;
+        if (lastSequence % 32768 > 0)
+            aoblks[segno] += 1;
+        if (lastSequence > 0)
+            nblocks = seg_start_blk + aoblks[segno];
+    }
+
+    UnregisterSnapshot(snapshot);
+
+	return nblocks;
+}
+
 /*
  * Execute the index scan.
  *
@@ -394,7 +460,6 @@ bringetbitmap(IndexScanDesc scan, Node **bmNodeP)
 	Size		btupsz = 0;
 	int			segno;
 	BlockNumber seg_start_blk;
-	int64		lastSequence;
 
 	opaque = (BrinOpaque *) scan->opaque;
 	bdesc = opaque->bo_bdesc;
@@ -429,30 +494,10 @@ bringetbitmap(IndexScanDesc scan, Node **bmNodeP)
 	 * of tid in each aoseg.
 	 */
 	if (RelationIsAppendOptimized(heapRel))
-	{
-		Snapshot	appendOnlyMetaDataSnapshot = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
-		Oid			segrelid;
-
-		GetAppendOnlyEntryAuxOids(heapRel->rd_id, NULL, &segrelid, NULL, NULL, NULL, NULL);
-
-		for (segno = 0; segno < AOTupleId_MaxSegmentFileNum; ++segno)
-		{
-			lastSequence = ReadLastSequence(segrelid, segno);
-
-			seg_start_blk = segnoGetCurrentAosegStart(segno);
-			aoBlocks[segno] = lastSequence / 32768;
-			if (lastSequence % 32768 > 0)
-				aoBlocks[segno] += 1;
-			if (lastSequence >0)
-				nblocks = seg_start_blk + aoBlocks[segno];
-		}
-
-		UnregisterSnapshot(appendOnlyMetaDataSnapshot);
-	}
+		nblocks = brin_ao_tid_ranges(heapRel, aoBlocks);
 	else
-	{
 		nblocks = RelationGetNumberOfBlocks(heapRel);
-	}
+
 	table_close(heapRel, AccessShareLock);
 
 	/*
@@ -607,7 +652,7 @@ bringetbitmap(IndexScanDesc scan, Node **bmNodeP)
 			BlockNumber pageno;
 
 			for (pageno = heapBlk;
-				 pageno <= heapBlk + opaque->bo_pagesPerRange - 1;
+				 pageno <= Min(nblocks, heapBlk + opaque->bo_pagesPerRange) - 1;
 				 pageno++)
 			{
 				MemoryContextSwitchTo(oldcxt);
@@ -927,7 +972,7 @@ brinoptions(Datum reloptions, bool validate)
 	fillRelOptions((void *) rdopts, sizeof(BrinOptions), options, numoptions,
 				   validate, tab, lengthof(tab));
 
-	pfree(options);
+	free_options_deep(options, numoptions);
 
 	return (bytea *) rdopts;
 }
@@ -941,7 +986,7 @@ brin_summarize_new_values_internal(PG_FUNCTION_ARGS)
 {
 	Datum		relation = PG_GETARG_DATUM(0);
 
-	return DirectFunctionCall2(brin_summarize_range,
+	return DirectFunctionCall2(brin_summarize_range_internal,
 							   relation,
 							   Int64GetDatum((int64) BRIN_ALL_BLOCKRANGES));
 }
@@ -952,7 +997,7 @@ brin_summarize_new_values_internal(PG_FUNCTION_ARGS)
  * unsummarized ranges are summarized.
  */
 Datum
-brin_summarize_range(PG_FUNCTION_ARGS)
+brin_summarize_range_internal(PG_FUNCTION_ARGS)
 {
 	Oid			indexoid = PG_GETARG_OID(0);
 	int64		heapBlk64 = PG_GETARG_INT64(1);
@@ -960,6 +1005,9 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 	Oid			heapoid;
 	Relation	indexRel;
 	Relation	heapRel;
+	Oid			save_userid;
+	int			save_sec_context;
+	int			save_nestlevel;
 	double		numSummarized = 0;
 
 	if (RecoveryInProgress())
@@ -992,9 +1040,30 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 	 */
 	heapoid = IndexGetRelation(indexoid, true);
 	if (OidIsValid(heapoid))
+	{
 		heapRel = table_open(heapoid, ShareUpdateExclusiveLock);
+
+		/*
+		 * Autovacuum calls us.  For its benefit, switch to the table owner's
+		 * userid, so that any index functions are run as that user.  Also
+		 * lock down security-restricted operations and arrange to make GUC
+		 * variable changes local to this command.  This is harmless, albeit
+		 * unnecessary, when called from SQL, because we fail shortly if the
+		 * user does not own the index.
+		 */
+		GetUserIdAndSecContext(&save_userid, &save_sec_context);
+		SetUserIdAndSecContext(heapRel->rd_rel->relowner,
+							   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+		save_nestlevel = NewGUCNestLevel();
+	}
 	else
+	{
 		heapRel = NULL;
+		/* Set these just to suppress "uninitialized variable" warnings */
+		save_userid = InvalidOid;
+		save_sec_context = -1;
+		save_nestlevel = -1;
+	}
 
 	indexRel = index_open(indexoid, ShareUpdateExclusiveLock);
 
@@ -1007,7 +1076,7 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 						RelationGetRelationName(indexRel))));
 
 	/* User must own the index (comparable to privileges needed for VACUUM) */
-	if (!pg_class_ownercheck(indexoid, GetUserId()))
+	if (heapRel != NULL && !pg_class_ownercheck(indexoid, save_userid))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_INDEX,
 					   RelationGetRelationName(indexRel));
 
@@ -1024,6 +1093,12 @@ brin_summarize_range(PG_FUNCTION_ARGS)
 
 	/* OK, do it */
 	brinsummarize(indexRel, heapRel, heapBlk, true, &numSummarized, NULL);
+
+	/* Roll back any GUC changes executed by index functions */
+	AtEOXact_GUC(false, save_nestlevel);
+
+	/* Restore userid and security context */
+	SetUserIdAndSecContext(save_userid, save_sec_context);
 
 	relation_close(indexRel, ShareUpdateExclusiveLock);
 	relation_close(heapRel, ShareUpdateExclusiveLock);
@@ -1066,6 +1141,9 @@ brin_desummarize_range(PG_FUNCTION_ARGS)
 	 * passed indexoid isn't an index then IndexGetRelation() will fail.
 	 * Rather than emitting a not-very-helpful error message, postpone
 	 * complaining, expecting that the is-it-an-index test below will fail.
+	 *
+	 * Unlike brin_summarize_range(), autovacuum never calls this.  Hence, we
+	 * don't switch userid.
 	 */
 	heapoid = IndexGetRelation(indexoid, true);
 	if (OidIsValid(heapoid))
@@ -1410,11 +1488,10 @@ brinsummarize(Relation index, Relation heapRel, BlockNumber pageRange,
 	BlockNumber heapNumBlocks = 0;
 	BlockNumber pagesPerRange;
 	BlockNumber startBlk;
-	BlockNumber aoBlocks[AOTupleId_MaxSegmentFileNum];
+	BlockNumber aoBlocks[AOTupleId_MaxSegmentFileNum] = {0};
 	Buffer		buf;
 	int			segno;
 	BlockNumber seg_start_blk;
-	int64		lastSequence;
 
 	revmap = brinRevmapInitialize(index, &pagesPerRange, NULL);
 
@@ -1425,30 +1502,9 @@ brinsummarize(Relation index, Relation heapRel, BlockNumber pageRange,
 	 * of tid in each aoseg.
 	 */
 	if (RelationIsAppendOptimized(heapRel))
-	{
-		Snapshot	appendOnlyMetaDataSnapshot = RegisterSnapshot(GetCatalogSnapshot(InvalidOid));
-		Oid			segrelid;
-
-		GetAppendOnlyEntryAuxOids(heapRel->rd_id, NULL, &segrelid, NULL, NULL, NULL, NULL);
-
-		for (segno = 0; segno < AOTupleId_MaxSegmentFileNum; ++segno)
-		{
-			lastSequence = ReadLastSequence(segrelid, segno);
-
-			seg_start_blk = segnoGetCurrentAosegStart(segno);
-			aoBlocks[segno] = lastSequence / 32768;
-			if (lastSequence % 32768 > 0)
-				aoBlocks[segno] += 1;
-			if (lastSequence > 0)
-				heapNumBlocks = seg_start_blk + aoBlocks[segno];
-		}
-
-		UnregisterSnapshot(appendOnlyMetaDataSnapshot);
-	}
+		heapNumBlocks = brin_ao_tid_ranges(heapRel, aoBlocks);
 	else
-	{
 		heapNumBlocks = RelationGetNumberOfBlocks(heapRel);
-	}
 
 	if (pageRange == BRIN_ALL_BLOCKRANGES)
 		startBlk = 0;

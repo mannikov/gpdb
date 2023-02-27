@@ -211,6 +211,12 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 GPOS_WSZ_LIT(
 		 "Enable plan alternatives where NLJ's outer child is replicated")},
 
+	{EopttraceDiscardRedistributeHashJoin,
+	 &optimizer_discard_redistribute_hashjoin,
+	 false,	 // m_negate_param
+	 GPOS_WSZ_LIT(
+		 "Discard plan alternatives where hash join has a redistribute motion child")},
+
 	{EopttraceMotionHazardHandling, &optimizer_enable_streaming_material,
 	 false,	 // m_fNegate
 	 GPOS_WSZ_LIT(
@@ -378,11 +384,6 @@ CConfigParamMapping::PackConfigParamInBitset(
 	{
 		traceflag_bitset->ExchangeSet(
 			GPOPT_DISABLE_XFORM_TF(CXform::ExfMaxOneRow2Assert));
-	}
-
-	if (!optimizer_enable_partial_index)
-	{
-		// GPDB_12_MERGE_FIXME: Remove this GUC
 	}
 
 	if (!optimizer_enable_hashjoin)

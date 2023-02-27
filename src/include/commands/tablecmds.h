@@ -17,6 +17,7 @@
 #include "access/attnum.h"
 #include "catalog/dependency.h"
 #include "catalog/gp_distribution_policy.h"
+#include "catalog/pg_am.h"
 #include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "nodes/execnodes.h"
@@ -27,6 +28,10 @@
 #include "parser/parse_node.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
+
+/* Convenient macro for checking AO AMs */
+#define IsAccessMethodAO(am_oid) \
+	(am_oid == AO_ROW_TABLE_AM_OID || am_oid == AO_COLUMN_TABLE_AM_OID)
 
 extern const char *synthetic_sql;
 
@@ -84,6 +89,8 @@ extern void RenameRelationInternal(Oid myrelid,
 								   const char *newrelname, bool is_internal,
 								   bool is_index);
 
+extern void ResetRelRewrite(Oid myrelid);
+
 extern void find_composite_type_dependencies(Oid typeOid,
 											 Relation origRelation,
 											 const char *origTypeName);
@@ -115,6 +122,7 @@ extern bool PartConstraintImpliedByRelConstraint(Relation scanrel,
 
 /* GPDB specific functions */
 extern void ATExecGPPartCmds(Relation origrel, AlterTableCmd *cmd);
+extern void GpAlterPartMetaTrackUpdObject(Oid relid, AlterTableType subcmdtype);
 extern void GpRenameChildPartitions(Relation targetrelation,
 									const char *oldparentrelname,
 									const char *newparentrelname);

@@ -241,6 +241,26 @@ stream_begin_iterate(StreamNode *self, StreamBMIterator *iterator)
 }
 
 /*
+ * bminitbitmap() -- return an empty bitmap.
+ * */
+void
+bminitbitmap(Node **bmNodeP)
+{
+    IndexStream  *is;
+
+    is = (IndexStream *)palloc0(sizeof(IndexStream));
+    is->type = BMS_INDEX;
+    is->begin_iterate = stream_begin_iterate;
+    is->free = indexstream_free;
+
+    StreamBitmap *sb = makeNode(StreamBitmap);
+    sb->streamNode = is;
+    *bmNodeP = (Node *) sb;
+
+    return;
+}
+
+/*
  * bmgetbitmap() -- return a stream bitmap.
  */
 int64
@@ -866,6 +886,9 @@ copy_scan_desc(IndexScanDesc scan)
  *
  * If newentry is false, we're calling the function with a partially filled
  * page table entry. Otherwise, the entry is empty.
+ *
+ * This function is only used in stream bitmap scan, more specifically, it's
+ * BitmapIndexScan + BitmapHeapScan.
  */
 
 static bool
@@ -936,7 +959,7 @@ restart:
 	 */
 	if (words->firstTid < result->nextTid)
 	{
-		Assert(words->nwords < 1);
+		Assert(words->nwords == 0);
 		return false;
 	}
 

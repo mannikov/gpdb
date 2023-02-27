@@ -32,7 +32,7 @@ OBJS        = CExpression.o \
               CLogicalDynamicGet.o \
               CLogicalDynamicGetBase.o \
               CLogicalDynamicIndexGet.o \
-              CLogicalExternalGet.o \
+              CLogicalForeignGet.o \
               CLogicalFullOuterJoin.o \
               CLogicalGbAgg.o \
               CLogicalGbAggDeduplicate.o \
@@ -66,7 +66,6 @@ OBJS        = CExpression.o \
               CLogicalPartitionSelector.o \
               CLogicalProject.o \
               CLogicalRightOuterJoin.o \
-              CLogicalRowTrigger.o \
               CLogicalSelect.o \
               CLogicalSequence.o \
               CLogicalSequenceProject.o \
@@ -93,7 +92,7 @@ OBJS        = CExpression.o \
               CPhysicalDynamicIndexScan.o \
               CPhysicalDynamicScan.o \
               CPhysicalDynamicTableScan.o \
-              CPhysicalExternalScan.o \
+              CPhysicalForeignScan.o \
               CPhysicalFilter.o \
               CPhysicalFullMergeJoin.o \
               CPhysicalHashAgg.o \
@@ -124,7 +123,6 @@ OBJS        = CExpression.o \
               CPhysicalParallelUnionAll.o \
               CPhysicalPartitionSelector.o \
               CPhysicalRightOuterHashJoin.o \
-              CPhysicalRowTrigger.o \
               CPhysicalScalarAgg.o \
               CPhysicalScan.o \
               CPhysicalSequence.o \
@@ -184,7 +182,8 @@ OBJS        = CExpression.o \
               CScalarSwitchCase.o \
               CScalarWindowFunc.o \
               CStrictHashedDistributions.o \
-              CWindowPreprocessor.o
+              CWindowPreprocessor.o \
+              COrderedAggPreprocessor.o
 
 include $(top_srcdir)/src/backend/common.mk
 

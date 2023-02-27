@@ -32,7 +32,6 @@
 #include "libpq/libpq-be.h"
 #include "postmaster/backoff.h"
 #include "utils/resource_manager.h"
-#include "utils/resgroup-ops.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "cdb/memquota.h"
@@ -77,8 +76,6 @@ bool		gp_external_enable_exec = true; /* allow ext tables with EXECUTE */
 bool		verify_gpfdists_cert; /* verifies gpfdist's certificate */
 
 int			gp_external_max_segs;	/* max segdbs per gpfdist/gpfdists URI */
-
-int			gp_safefswritesize; /* set for safe AO writes in non-mature fs */
 
 int			gp_cached_gang_threshold;	/* How many gangs to keep around from
 										 * stmt to stmt. */
@@ -209,6 +206,7 @@ int			Gp_interconnect_debug_retry_interval = 10;
 int			interconnect_setup_timeout = 7200;
 
 int			Gp_interconnect_type = INTERCONNECT_TYPE_UDPIFC;
+int 		Gp_interconnect_address_type = INTERCONNECT_ADDRESS_TYPE_UNICAST;
 
 bool		gp_interconnect_aggressive_retry = true;	/* fast-track app-level
 														 * retry */
@@ -321,6 +319,9 @@ char	   *gp_autostats_mode_in_functions_string;
 int			gp_autostats_on_change_threshold = 100000;
 bool		gp_autostats_allow_nonowner = false;
 bool		log_autostats = true;
+
+/* GUC to toggle JIT instrumentation output for EXPLAIN */
+bool		gp_explain_jit = true;
 
 /* --------------------------------------------------------------------------------------------------
  * Server debugging
@@ -513,7 +514,8 @@ gpvars_check_gp_resource_manager_policy(char **newval, void **extra, GucSource s
 	if (*newval == NULL ||
 		*newval[0] == 0 ||
 		!pg_strcasecmp("queue", *newval) ||
-		!pg_strcasecmp("group", *newval))
+		!pg_strcasecmp("group", *newval) ||
+		!pg_strcasecmp("group-v2", *newval))
 		return true;
 
 	GUC_check_errmsg("invalid value for resource manager policy: \"%s\"", *newval);
@@ -523,21 +525,18 @@ gpvars_check_gp_resource_manager_policy(char **newval, void **extra, GucSource s
 void
 gpvars_assign_gp_resource_manager_policy(const char *newval, void *extra)
 {
-	/*
-	 * Probe resgroup configurations even not in resgroup mode,
-	 * variables like gp_resource_group_enable_cgroup_memory need to
-	 * be properly set in all modes.
-	 */
-	ResGroupOps_Probe();
-
 	if (newval == NULL || newval[0] == 0)
 		Gp_resource_manager_policy = RESOURCE_MANAGER_POLICY_QUEUE;
 	else if (!pg_strcasecmp("queue", newval))
 		Gp_resource_manager_policy = RESOURCE_MANAGER_POLICY_QUEUE;
 	else if (!pg_strcasecmp("group", newval))
 	{
-		ResGroupOps_Bless();
 		Gp_resource_manager_policy = RESOURCE_MANAGER_POLICY_GROUP;
+		gp_enable_resqueue_priority = false;
+	}
+	else if (!pg_strcasecmp("group-v2", newval))
+	{
+		Gp_resource_manager_policy = RESOURCE_MANAGER_POLICY_GROUP_V2;
 		gp_enable_resqueue_priority = false;
 	}
 	/*
@@ -554,6 +553,8 @@ gpvars_show_gp_resource_manager_policy(void)
 			return "queue";
 		case RESOURCE_MANAGER_POLICY_GROUP:
 			return "group";
+		case RESOURCE_MANAGER_POLICY_GROUP_V2:
+			return "group-v2";
 		default:
 			Assert(!"unexpected resource manager policy");
 			return "unknown";

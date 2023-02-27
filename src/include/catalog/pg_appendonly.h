@@ -17,6 +17,7 @@
 
 #include "catalog/genbki.h"
 #include "catalog/pg_appendonly_d.h"
+#include "catalog/pg_class.h"
 #include "utils/relcache.h"
 #include "utils/snapshot.h"
 
@@ -26,12 +27,6 @@
 CATALOG(pg_appendonly,6105,AppendOnlyRelationId)
 {
 	Oid				relid;				/* relation id */
-	int32			blocksize;			/* the max block size of this relation */
-	int32			safefswritesize;	/* min write size in bytes to prevent torn-write */
-	int16			compresslevel;		/* the (per seg) total number of varblocks */
-	bool			checksum;			/* true if checksum is stored with data and checked */
-	NameData		compresstype;		/* the compressor used (e.g. zlib) */
-    bool            columnstore;        /* true if orientation is column */ 
     Oid             segrelid;           /* OID of aoseg table; 0 if none */
     Oid             blkdirrelid;        /* OID of aoblkdir table; 0 if none */
     Oid             blkdiridxid;        /* if aoblkdir table, OID of aoblkdir index */
@@ -68,10 +63,11 @@ typedef enum AORelationVersion
 											 * were introduced, see MPP-7251 and MPP-7372. */
 	AORelationVersion_PG83 = 3,				/* Same as Aligned64bit, but numerics are stored
 											 * in the PostgreSQL 8.3 format. */
+	AORelationVersion_PG12 = 4,             /* version that removed block directory hole filling. */
 	MaxAORelationVersion                    /* must always be last */
 } AORelationVersion;
 
-#define AORelationVersion_GetLatest() AORelationVersion_PG83
+#define AORelationVersion_GetLatest() AORelationVersion_PG12
 
 #define AORelationVersion_IsValid(version) \
 	(version > AORelationVersion_None && version < MaxAORelationVersion)
@@ -99,23 +95,8 @@ static inline void AORelationVersion_CheckValid(int version)
 	(version > AORelationVersion_Original) \
 )
 
-/*
- * Are numerics stored in old, pre-PostgreSQL 8.3 format, and need converting?
- */
-#define PG82NumericConversionNeeded(version) \
-( \
-	AORelationVersion_CheckValid(version), \
-	(version < AORelationVersion_PG83) \
-)
-
 extern void
 InsertAppendOnlyEntry(Oid relid,
-					  int blocksize,
-					  int safefswritesize,
-					  int compresslevel,
-					  bool checksum,
-					  bool columnstore,
-					  char* compresstype,
 					  Oid segrelid,
 					  Oid blkdirrelid,
 					  Oid blkdiridxid,
@@ -125,7 +106,6 @@ InsertAppendOnlyEntry(Oid relid,
 void
 GetAppendOnlyEntryAttributes(Oid relid,
 							 int32 *blocksize,
-							 int32 *safefswritesize,
 							 int16 *compresslevel,
 							 bool *checksum,
 							 NameData *compresstype);
@@ -138,8 +118,7 @@ GetAppendOnlyEntryAttributes(Oid relid,
  * not NULL.
  */
 void
-GetAppendOnlyEntryAuxOids(Oid relid,
-						  Snapshot appendOnlyMetaDataSnapshot,
+GetAppendOnlyEntryAuxOids(Relation rel,
 						  Oid *segrelid,
 						  Oid *blkdirrelid,
 						  Oid *blkdiridxid,
@@ -148,7 +127,7 @@ GetAppendOnlyEntryAuxOids(Oid relid,
 
 
 void
-GetAppendOnlyEntry(Oid relid, Form_pg_appendonly aoEntry);
+GetAppendOnlyEntry(Relation rel, Form_pg_appendonly aoEntry);
 /*
  * Update the segrelid and/or blkdirrelid if the input new values
  * are valid OIDs.
@@ -164,7 +143,6 @@ UpdateAppendOnlyEntryAuxOids(Oid relid,
 extern void
 RemoveAppendonlyEntry(Oid relid);
 
-extern void
-SwapAppendonlyEntries(Oid entryRelId1, Oid entryRelId2);
+extern void ATAOEntries(Form_pg_class relform1, Form_pg_class relform2);
 
 #endif   /* PG_APPENDONLY_H */

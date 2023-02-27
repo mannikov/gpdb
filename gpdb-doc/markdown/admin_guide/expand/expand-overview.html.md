@@ -39,7 +39,7 @@ Once the new servers are installed and tested, the software phase of the Greenpl
     When all tables have been redistributed, the expansion is complete.
 
 
-**Important:** The `gprestore` utility cannot restore backups you made before the expansion with the `gpbackup` utility, so back up your databases immediately after the system expansion is complete.
+> **Important** The `gprestore` utility cannot restore backups you made before the expansion with the `gpbackup` utility, so back up your databases immediately after the system expansion is complete.
 
 Redistributing table data is a long-running process that creates a large volume of network and disk activity. It can take days to redistribute some very large databases. To minimize the effects of the increased activity on business operations, system administrators can pause and resume expansion activity on an ad hoc basis, or according to a predetermined schedule. Datasets can be prioritized so that critical applications benefit first from the expansion.
 
@@ -80,5 +80,5 @@ In a typical operation, you run the `gpexpand` utility four times with different
 
 For information about the [gpexpand](../../utility_guide/ref/gpexpand.html) utility and the other utilities that are used for system expansion, see the *Greenplum Database Utility Guide*.
 
-**Parent topic:**[Expanding a Greenplum System](../expand/expand-main.html)
+**Parent topic:** [Expanding a Greenplum System](../expand/expand-main.html)
 

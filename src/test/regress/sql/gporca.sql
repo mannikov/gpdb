@@ -538,7 +538,6 @@ insert into orca.t_date values('01-03-2012'::date,7,'tag1','tag2');
 insert into orca.t_date values('01-03-2012'::date,8,'tag1','tag2');
 insert into orca.t_date values('01-03-2012'::date,9,'tag1','tag2');
 
-set optimizer_enable_partial_index=on;
 set optimizer_enable_space_pruning=off;
 set optimizer_enable_constant_expression_evaluation=on;
 -- start_ignore
@@ -587,7 +586,6 @@ select * from orca.t_text where user_id=9;
 reset optimizer_enable_space_pruning;
 set optimizer_enumerate_plans=off;
 reset optimizer_enable_constant_expression_evaluation;
-reset optimizer_enable_partial_index;
 
 -- test that constant expression evaluation works with integers
 drop table if exists orca.t_ceeval_ints;
@@ -604,7 +602,6 @@ insert into orca.t_ceeval_ints values(3, 100, 'tag1', 'tag2');
 insert into orca.t_ceeval_ints values(4, 101, 'tag1', 'tag2');
 insert into orca.t_ceeval_ints values(5, 102, 'tag1', 'tag2');
 
-set optimizer_enable_partial_index=on;
 set optimizer_enable_space_pruning=off;
 set optimizer_enable_constant_expression_evaluation=on;
 set optimizer_use_external_constant_expression_evaluation_for_ints = on;
@@ -618,7 +615,6 @@ reset optimizer_enable_space_pruning;
 reset optimizer_enumerate_plans;
 reset optimizer_use_external_constant_expression_evaluation_for_ints;
 reset optimizer_enable_constant_expression_evaluation;
-reset optimizer_enable_partial_index;
 
 -- test project elements in TVF
 
@@ -1785,7 +1781,6 @@ select disable_xform('CXformInnerJoin2IndexGetApply');
 select disable_xform('CXformInnerJoin2NLJoin');
 -- end_ignore
 
-set optimizer_enable_partial_index=on;
 set optimizer_enable_indexjoin=on;
 
 -- force_explain
@@ -1802,7 +1797,6 @@ ORDER BY 1 asc ;
 reset optimizer_segments;
 reset optimizer_enable_constant_expression_evaluation;
 reset optimizer_enable_indexjoin;
-reset optimizer_enable_partial_index;
 
 -- start_ignore
 select enable_xform('CXformInnerJoin2DynamicIndexGetApply');
@@ -2348,7 +2342,7 @@ analyze ds_part;
 analyze non_part1;
 analyze non_part2;
 SELECT * FROM ds_part, non_part2 WHERE ds_part.c = non_part2.e AND non_part2.f = 10 AND a IN ( SELECT b + 1 FROM non_part1);
-explain SELECT * FROM ds_part, non_part2 WHERE ds_part.c = non_part2.e AND non_part2.f = 10 AND a IN ( SELECT b + 1 FROM non_part1);
+explain analyze SELECT * FROM ds_part, non_part2 WHERE ds_part.c = non_part2.e AND non_part2.f = 10 AND a IN ( SELECT b + 1 FROM non_part1);
 
 SELECT *, a IN ( SELECT b + 1 FROM non_part1) FROM ds_part, non_part2 WHERE ds_part.c = non_part2.e AND non_part2.f = 10 AND a IN ( SELECT b FROM non_part1);
 CREATE INDEX ds_idx ON ds_part(a);
@@ -2672,7 +2666,6 @@ insert into tcorr2 values (1,1);
 analyze tcorr1;
 analyze tcorr2;
 
-set optimizer_trace_fallback to on;
 
 explain
 select *
@@ -2817,7 +2810,6 @@ analyze tbitmap;
 set optimizer_join_order = query;
 set optimizer_enable_hashjoin = off;
 set optimizer_enable_groupagg = off;
-set optimizer_trace_fallback = on;
 set enable_sort = off;
 
 -- 1 simple btree
@@ -2927,7 +2919,6 @@ select count(*), t2.c from roj1 t1 left join roj2 t2 on t1.a = t2.c group by t2.
 explain (costs off) select count(*), t2.c from roj1 t1 left join roj2 t2 on t1.a = t2.c group by t2.c;
 reset optimizer_enable_motion_redistribute;
 
-reset optimizer_trace_fallback;
 reset enable_sort;
 
 -- simple check for btree indexes on AO tables
@@ -2953,7 +2944,6 @@ analyze t_ao_btree;
 analyze tpart_ao_btree;
 analyze tpart_dim;
 
-set optimizer_trace_fallback to on;
 set optimizer_enable_hashjoin to off;
 
 -- this should use a bitmap scan on the btree index
@@ -2987,11 +2977,9 @@ select enable_xform('CXformInnerJoin2NLJoin');
 -- end_ignore
 
 reset optimizer_enable_hashjoin;
-reset optimizer_trace_fallback;
 
 -- Tests converted from MDPs that use tables partitioned on text columns and similar types,
 -- which can't be handled in ORCA MDPs, since they would require calling the GPDB executor
-set optimizer_trace_fallback = on;
 
 -- GroupingOnSameTblCol-2.mdp
 -- from dxl
@@ -3237,7 +3225,6 @@ with v(year) as (
     select 2019::int)
 select * from v where year > 1;
 
-reset optimizer_trace_fallback;
 
 create table sqall_t1(a int) distributed by (a);
 insert into sqall_t1 values (1), (2), (3);
@@ -3368,7 +3355,6 @@ reset statement_timeout;
 
 -- an agg of a non-SRF with a nested SRF should be treated as a SRF, the
 -- optimizer must not eliminate the SRF or it can produce incorrect results
-set optimizer_trace_fallback = on;
 create table nested_srf(a text);
 insert into nested_srf values ('abc,def,ghi');
 
@@ -3388,7 +3374,6 @@ insert into nested_srf values (NULL);
 select * from (select trim(regexp_split_to_table((a)::text, ','::text)) from nested_srf)a;
 select count(*) from (select trim(regexp_split_to_table((a)::text, ','::text)) from nested_srf)a;
 
-reset optimizer_trace_fallback;
 --- if the inner child is already distributed on the join column, orca should
 --- not place any motion on the inner child
 CREATE TABLE tone (a int, b int, c int);
@@ -3478,6 +3463,51 @@ update window_agg_test t
 set i = tt.i 
 from (select (min(i) over (order by j)) as i, j from window_agg_test) tt
 where t.j = tt.j;
+
+----------------------------------
+-- Test ORCA support for const TVF
+----------------------------------
+create type complex_t as (r float8, i float8);
+-- Nested composite
+create type quad as (c1 complex_t, c2 complex_t);
+create function quad_func_cast() returns quad immutable as $$ select ((1.1,null),(2.2,null))::quad $$ language sql;
+explain select c1 from quad_func_cast();
+explain select c2 from quad_func_cast();
+explain select (c1).r from quad_func_cast();
+explain select (c2).i from quad_func_cast();
+select c1 from quad_func_cast();
+select c2 from quad_func_cast();
+select (c1).r from quad_func_cast();
+select (c2).i from quad_func_cast();
+
+create type mix_type as (a text, b integer, c bool);
+create function mix_func_cast() returns mix_type immutable as $$ select ('column1', 1, true)::mix_type $$ language sql;
+explain select a from mix_func_cast();
+explain select b from mix_func_cast();
+explain select c from mix_func_cast();
+select a from mix_func_cast();
+select b from mix_func_cast();
+select c from mix_func_cast();
+
+-- the query with empty CTE producer target list should fall back to Postgres
+-- optimizer without any error on build without asserts
+drop table if exists empty_cte_tl_test;
+create table empty_cte_tl_test(id int);
+
+with cte as (
+  select from empty_cte_tl_test
+)
+select * 
+from empty_cte_tl_test
+where id in(select id from cte);
+
+-- test that we use default cardinality estimate (40) for non-comparable types
+create table ts_tbl (ts timestamp);
+create index ts_tbl_idx on ts_tbl(ts);
+insert into ts_tbl select to_timestamp('99991231'::text, 'YYYYMMDD'::text) from generate_series(1,100);
+analyze ts_tbl;
+explain select * from ts_tbl where ts = to_timestamp('99991231'::text, 'YYYYMMDD'::text);
+
 
 -- start_ignore
 DROP SCHEMA orca CASCADE;
